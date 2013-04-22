@@ -30,6 +30,12 @@ class Simulation:
 	def GetResults(self, delegates, type=Results.Bias):
 		return [ (title, delegates[title](matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) \
 			for coef in self.__estimates]), 0)) for title in delegates]
+			
+	def PrintTable(self, results, coefnames):
+		print "{0}{1}".format(" "*21, "".join(["{: >10}".format(cname) for cname in coefnames]))
+		for k,v in res1+res2:
+			print "{0: <20} {1}".format(k, "".join(["{:10.4f}".format(a) for a in (asarray(v).tolist())[0]]))
+			
 
 # usage
 
@@ -53,5 +59,4 @@ res1 = x.GetResults( {"Bias":mean, "RMSE": lambda x,axis: sqrt(power(mean(x, axi
 res2 = x.GetResults( {"Average":mean, "Variance":var, \
 	"95th Quantile": lambda x,axis: [scoreatpercentile(x,95, axis=axis)]}, type=Results.Original )
 
-for k,v in res1+res2:
-	print "{0: <20} {1}".format(k, (" "*5).join(["{: .4f}".format(a) for a in (asarray(v).tolist())[0]]))
+x.PrintTable(res1+res2, ("beta{} "*3).format(1,2,3).split())
