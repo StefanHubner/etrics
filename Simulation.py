@@ -1,7 +1,8 @@
 from Utilities import EventHook, enum
-from numpy import * 
-from scipy.stats import * 
-import statsmodels.api as models
+from numpy import mean,var,matrix,power,multiply,double,asarray 
+from scipy.stats import norm, scoreatpercentile 
+from scipy import sqrt
+from fractions import Fraction
 
 Results = enum('Original', 'Bias')
 
@@ -32,21 +33,23 @@ class Simulation:
 		for i in range(S):
 			self.__data = self.Generating.Fire(self.__samplesize, self.__parameters)[0]
 			self.__estimates.append(self.Estimating.Fire(self.__data)[0])
+			self.PostEstimation.Fire(Fraction(i,S))
 	
 	def AddStatistics(self, delegates, type=Results.Bias):
 		for k,v in delegates.iteritems(): 
 			(self.__evaluations[type])[k] = v
 
 	def GetResults(self, type):
-		return [ (title, fct(matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) for coef in self.__estimates]), 0)) for title,fct in self.__evaluations[type].iteritems()] 
+		return [ (title, fct(matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) \
+			for coef in self.__estimates]), 0)) for title,fct in self.__evaluations[type].iteritems()] 
 
 	def PrintTable(self):
-		print "{0}{1}".format(" "*21, "".join(["{: >10}".format(cname) for cname in self.__parnames]))
+		print "\n{0}{1}".format(" "*21, "".join(["{: >10}".format(cname) for cname in self.__parnames]))
 		for k,v in self.GetResults(Results.Original)+self.GetResults(Results.Bias):
 			print "{0: <20} {1}".format(k, "".join(["{:10.4f}".format(a) for a in (asarray(v).tolist())[0]]))
 			
 
-# usage
+# usage example
 
 def createData(N, theta):
 	X = matrix([repeat(1, N), norm.rvs(4, 2, N), norm.rvs(5, 1, N)])
@@ -57,17 +60,28 @@ def estimateModel(data):
 	res = models.OLS(data[0], data[1]).fit()
 	return res.params
 
-x = Simulation()
-x.SetParameters([1,2,3], ("beta{} "*3).format(1,2,3).split())
-x.SetSampleSize(1000)
-x.Generating += createData
-x.Estimating += estimateModel
-x.Simulate(100)
+def onPostEstimation(progress):
+	if progress % Fraction(1,10) == 0: print(str(progress)+"..."), 
 
-x.AddStatistics({"95th Quantile": lambda x,axis: [scoreatpercentile(x, 95, axis=axis)]}, type=Results.Original)
-x.AddStatistics({"Median": lambda x,axis: [scoreatpercentile(x, 50, axis=axis)]}, type=Results.Original)
+def main():
+	x = Simulation()
+	x.SetParameters([1,2,3], ("beta{} "*3).format(1,2,3).split())
+	x.SetSampleSize(1000)
+	x.Generating += createData
+	x.Estimating += estimateModel
+	x.PostEstimation += onPostEstimation
+	
+	x.Simulate(100)
 
-res1 = x.GetResults(Results.Original)
-res2 = x.GetResults(Results.Bias)
+	x.AddStatistics({"95th Quantile": \
+		lambda x,axis: [scoreatpercentile(x, 95, axis=axis)]}, type=Results.Original)
+	x.AddStatistics({"Median": lambda x,axis: [scoreatpercentile(x, 50, axis=axis)]}, type=Results.Original)
 
-x.PrintTable()
+	res1 = x.GetResults(Results.Original)
+	res2 = x.GetResults(Results.Bias)
+
+	x.PrintTable()
+
+if __name__ == '__main__':
+	# main()
+	pass
