@@ -1,4 +1,4 @@
-from Utilities import EventHook, enum
+from .Utilities import EventHook, enum
 from numpy import mean, var, matrix, power, multiply, double, asarray, percentile 
 from scipy.stats import norm, scoreatpercentile 
 from scipy import sqrt
@@ -44,10 +44,9 @@ class Simulation:
 			for coef in self.__estimates]), 0)) for title,fct in self.__evaluations[type].iteritems()] 
 
 	def PrintTable(self):
-		print "\n{0}{1}".format(" "*21, "".join(["{: >10}".format(cname) for cname in self.__parnames]))
+		print ("\n{0}{1}".format(" "*21, "".join(["{: >10}".format(cname) for cname in self.__parnames])))
 		for k,v in self.GetResults(Results.Original)+self.GetResults(Results.Bias):
-			print "{0: <20} {1}".format(k, "".join(["{:10.4f}".format(a) for a in (asarray(v).tolist())[0]]))
-			
+			print ("{0: <20} {1}".format(k, "".join(["{:10.4f}".format(a) for a in (asarray(v).tolist())[0]]))) 
 
 # usage example
 
