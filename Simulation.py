@@ -1,5 +1,5 @@
 from Utilities import EventHook, enum
-from numpy import mean,var,matrix,power,multiply,double,asarray 
+from numpy import mean, var, matrix, power, multiply, double, asarray, percentile 
 from scipy.stats import norm, scoreatpercentile 
 from scipy import sqrt
 from fractions import Fraction
@@ -52,8 +52,8 @@ class Simulation:
 # usage example
 
 def createData(N, theta):
-	X = matrix([repeat(1, N), norm.rvs(4, 2, N), norm.rvs(5, 1, N)])
-	eps = matrix(norm.rvs(0, 1, N))
+	X = matrix([repeat(1, N), norm.rvs(loc=4, scale=2, size=N), norm.rvs(loc=5, scale=1, size=N)])
+	eps = matrix(norm.rvs(loc=0, scale=1, size=N))
 	return [X.T * matrix(theta).T + eps.T, X.T]
 
 def estimateModel(data):
@@ -75,7 +75,7 @@ def main():
 
 	x.AddStatistics({"95th Quantile": \
 		lambda x,axis: [scoreatpercentile(x, 95, axis=axis)]}, type=Results.Original)
-	x.AddStatistics({"Median": lambda x,axis: [scoreatpercentile(x, 50, axis=axis)]}, type=Results.Original)
+	x.AddStatistics({"Median": lambda x,axis: [percentile(x, 50, axis=axis)]}, type=Results.Original)
 
 	res1 = x.GetResults(Results.Original)
 	res2 = x.GetResults(Results.Bias)
