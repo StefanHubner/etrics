@@ -36,12 +36,12 @@ class Simulation:
 			self.PostEstimation.Fire(Fraction(i,S))
 	
 	def AddStatistics(self, delegates, type=Results.Bias):
-		for k,v in delegates.iteritems(): 
+		for k,v in delegates.items(): 
 			(self.__evaluations[type])[k] = v
 
 	def GetResults(self, type):
 		return [ (title, fct(matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) \
-			for coef in self.__estimates]), 0)) for title,fct in self.__evaluations[type].iteritems()] 
+			for coef in self.__estimates]), 0)) for title,fct in self.__evaluations[type].items()] 
 
 	def PrintTable(self):
 		print ("\n{0}{1}".format(" "*21, "".join(["{: >10}".format(cname) for cname in self.__parnames])))
@@ -60,7 +60,8 @@ def estimateModel(data):
 	return res.params
 
 def onPostEstimation(progress):
-	if progress % Fraction(1,10) == 0: print(str(progress)+"..."), 
+	if progress % Fraction(1,10) == 0: 
+		print(str(progress)+"...", end="") 
 
 def main():
 	x = Simulation()
