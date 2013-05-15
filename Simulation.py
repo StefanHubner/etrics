@@ -1,4 +1,4 @@
-from .Utilities import EventHook, enum
+from etrics.Utilities import EventHook, enum
 from numpy import mean, var, matrix, power, multiply, double, asarray, percentile 
 from scipy.stats import norm, scoreatpercentile 
 from scipy import sqrt
