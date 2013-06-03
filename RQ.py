@@ -38,9 +38,9 @@ class RQ(base.LikelihoodModel):
 		self.df_model = np.float(rank(self.exog)-1)
 		
 		self.c = -self.endog
-		self.A = np.concatenate(np.identity(self.endog.shape[0]), -np.identity(self.endog.shape[0]), axis=0)
+		self.A = np.concatenate([np.identity(self.endog.shape[0]), -np.identity(self.endog.shape[0])], axis=0)
 		self.Aeq = self.exog.T
-		self.B = np.concatenate(np.ones(self.endog.shape[0]), np.zeros(self.endog.shape[0]), axis=0)
+		self.b = np.concatenate([np.ones(self.endog.shape[0]), np.zeros(self.endog.shape[0])], axis=0)
 		self.beq = (1-self.tau) * sum(self.exog, 0)
 		self.t = 1 
 		self.eps = 10e-07
@@ -71,9 +71,8 @@ class RQ(base.LikelihoodModel):
 		return np.dot(exog, params)
 
 	def lpip(self, par): 
-		print(self.b - np.dot(self.A, par))
-		print(np.log(self.b - np.dot(self.A, par)))
-		return np.dot(self.c.T, par) * self.t + sum(-np.log(self.b - np.dot(self.A, par)), 1)
+		s = self.b - np.dot(self.A, par)
+		return np.dot(self.c.T, par) * self.t + sum(-np.log(s), 1) if min(s)>0 else np.inf
 
 	def grad_lpip(self, par):
 		# zeros for rest of equality components, don't move away from there
