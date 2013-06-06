@@ -1,16 +1,21 @@
+#!/usr/bin/python3.3
+
 from etrics.Utilities import EventHook
-from scipy.optimize import minimize
-from scipy import stats
-from scipy import linalg
 
-from statsmodels.tools.decorators import (resettable_cache, cache_readonly, cache_writable)
-from statsmodels.tools.tools import rank
-
+import scipy as sp
 import numpy as np
+
 import statsmodels.api as sm
 import statsmodels.base.model as base
 import statsmodels.base.wrapper as wrap
 import statsmodels.regression.linear_model as lm
+from statsmodels.tools.decorators import (resettable_cache, cache_readonly, cache_writable)
+from statsmodels.tools.tools import rank
+
+from matplotlib import rc
+from numpy import arange, cos, pi
+#from matplotlib.pyplot import figure, axes, plot, xlabel, ylabel, title, savefig, show
+import pylab as plot
 
 class NLRQ(base.LikelihoodModel):
 
@@ -18,18 +23,21 @@ class NLRQ(base.LikelihoodModel):
 		super(NLRQ, self).__init__(endog, exog, **kwargs)
 		self._initialize()
 		self.PostEstimation = EventHook()
+		self.PostInnerStep = EventHook()
+		self.PostOuterStep = EventHook()
 
 	def _initialize(self):
 		self.nobs = float(self.endog.shape[0])
-		self.df_resid = np.float(self.exog.shape[0] - rank(self.exog))
-		self.df_model = np.float(rank(self.exog)-1)
+		self.df_resid = np.float(self.exog.shape[0] - self.parlen)
+		self.df_model = np.float(self.parlen)
 		
 		self.eps = 10e-07
-		self.maxit = 10
+		self.maxit = 100
 		self.beta = 0.97
 		self.par = None
 		self.linearinpar = False
-		self.gradient = zeros(self.nobs, self.parlen)
+		self.weights = np.ones(self.nobs)
+		self.gradient = np.zeros(self.nobs * self.parlen).reshape(self.nobs, self.parlen)
 
 	def setcontrol(self, maxit, eps):
 		self.maxit = maxit
@@ -38,24 +46,26 @@ class NLRQ(base.LikelihoodModel):
 	def fit(self, **kwargs):
 
 		self.x0 = kwargs["x0"] # have to fit dimensions TODO check
-		self.par = zeros(self.parlen) # TODO smarter starting values
+		self.weights = kwargs["weights"].reshape(self.nobs) # have to fit dimensions TODO check
+		self.par = np.zeros(self.parlen) # TODO smarter starting values
 
-		w = zeros(self.nobs)
-		snew = loss(self.endog - self.predict(self.par))
-		sold = 10e+20
-		lam = 1
+		w = np.zeros(self.nobs)
+		self.wendog = np.multiply(self.endog, self.weights)
 
-		while k <= self.maxit and sold - snew > self.eps:
-			if not self.linearinpar or k == 0:
+		snew = np.sum(self.loss(self.wendog - self.predict(self.par)))
+		sold, lam, outer, inner, k = 10e+20, np.array(1.), 0, 0, 0
+
+		while outer <= self.maxit and sold - snew > self.eps:
+			if outer == 0 or not self.linearinpar:
 				self.calculategradient(self.par)
 
-			step, zw  = self.meketon(self.gradient, self.endog - self.predict(self.par), w, tau = self.tau) 
-			lam # from optimization of step(), self.par updated inside
-			self.par += lam*step
-			sold, snew = snew, np.sum(loss(self.endog - self.predict(self.par))) 
+			self.actstep, zw, k  = self.meketon(self.gradient, self.wendog - self.predict(self.par), w, tau = self.tau) 
+			res = sp.optimize.minimize_scalar(self.step, bounds=(0., 1.), method='bounded')
+			self.par += res.x * self.actstep
+			sold, snew = snew, np.sum(self.loss(self.wendog - self.predict(self.par))) 
 
-			q,r = linalg.qr(self.gradient, mode='economic')
-			w = zw - np.dot(np.linalg.inv(r), np.dot(q.T, zw))
+			q,r = sp.linalg.qr(self.gradient, mode='economic')
+			w = zw - np.dot(self.gradient, np.dot(np.linalg.inv(r), np.dot(q.T, zw)))
 
 			w1 = np.max(np.maximum(w, 0))
 			if w1 > self.tau:
@@ -64,43 +74,55 @@ class NLRQ(base.LikelihoodModel):
 			if w0 > 1 - self.tau:
 				w *= np.divide(1 - self.tau, w0 + self.eps)
 			
-			k += 1
+			inner += k
+			outer += 1
+			self.PostOuterStep.Fire({"iteration":outer, "par":self.par, "sold":sold, "snew":snew, "stepsize":res.x})
 				
 		self.normalized_cov_params =  np.identity(self.parlen)
-		res = NLRQResults(self, np.ones(self.exog.shape[1]), normalized_cov_params=self.normalized_cov_params)
-		res.fit_history['outer_iterations'] = 10
-		res.fit_history['avg_inner_iterations'] = 5.2
+		res = NLRQResults(self, self.par, np.identity(self.parlen))
+		res.fit_history['outer_iterations'] = outer
+		res.fit_history['avg_inner_iterations'] = inner/outer 
 
 		return NLRQResultsWrapper(res)
 
 	def calculategradient(self, par):
-		for i in range(self.nobs):
-			self.gradient[i,], self.linearinpar = Df(self.exog[i,], self.x0, self.par)
+		for i in range(int(self.nobs)):
+			self.gradient[i,], self.linearinpar = self.Df(self.exog[i,], self.x0, self.par)
+			self.gradient[i,] *= self.weights[i]
 
 	def predict(self, params, exog=None):
-		return dot(self.gradient, params)
+		return np.dot(self.gradient, params)
 
 	def loss(self, residuals):
-			return tau * np.maximum(residuals, 0) - (1 - tau) * np.minimum(residuals, 0)
+		return self.tau * np.maximum(residuals, 0) - (1 - self.tau) * np.minimum(residuals, 0)
 
 	def meketon(self, x, y, w, tau):
 		yw = 10e+20
-		k = 1
+		k = 0
 		z = None
-		while k <= self.maxit and yw - np.dot(y, w) > self.eps:
-			d = np.maximum(tau - w, 1 - tau + w])
-			z = sm.WLS(y, x, weights= d**2).fit()
-			yw = np.sum(self.loss(z.resid))
-			k += 1
-			s = z.resid * d**2
-			alpha = max(self.eps, np.maximum( np.divide(s, tau - w), np.divide(-s, 1 - tau + w)))
+		while k < self.maxit and yw - np.dot(y, w) > self.eps:
+			d = np.minimum(tau - w, 1 - tau + w)
+
+			#z = sm.WLS(y, x, weights = d**2, hasconst = False).fit()
+			#print(z.params)
+			#wx = np.array(np.multiply(x, np.kron(np.matrix(np.ones(self.parlen)).T, np.matrix(np.square(d))).T))
+
+			wx, wy = np.multiply(x.T, d).T, np.multiply(y, d)
+			q,r = sp.linalg.qr(wx, mode='economic')
+			wbeta = np.dot(np.linalg.inv(r), np.dot(q.T, wy))
+			wresid = y - np.dot(x, wbeta)
+			
+			yw = np.sum(self.loss(wresid))
+			s = wresid * np.square(d) 
+			alpha = np.max(np.concatenate([[self.eps], np.maximum( np.divide(s, tau - w), np.divide(-s, 1 - tau + w))]))
 			w += self.beta/alpha * s
-		
-		return z.coef, w
+			k += 1
+			self.PostInnerStep.Fire({"iteration":k, "par":wbeta, "yw":yw, "ydotw":np.dot(y,w)})
+
+		return wbeta, w, k
 	
-	def step(self, lambda, step, pars):
-		self.par = pars + lambda * step
-		return np.sum(self.loss(self.endog - self.predict(self.par)))
+	def step(self, lam):
+		return np.sum(self.loss(self.wendog - self.predict(self.par + lam * self.actstep)))
 
 class NLRQResults(base.LikelihoodModelResults):
 	fit_history = {}
@@ -113,11 +135,11 @@ class NLRQResults(base.LikelihoodModelResults):
 
 	@cache_readonly
 	def fittedvalues(self):
-		return np.dot(self.model.exog, self.params)
+		return self.model.predict(self.params)
 
 	@cache_readonly
 	def resid(self):
-		return self.model.endog - self.fittedvalues 
+		return self.model.wendog - self.fittedvalues 
 
 	@cache_readonly
 	def varcov(self):
@@ -125,7 +147,7 @@ class NLRQResults(base.LikelihoodModelResults):
 
 	@cache_readonly
 	def pvalues(self):
-		return stats.norm.sf(np.abs(self.tvalues))*2
+		return sp.stats.norm.sf(np.abs(self.tvalues))*2
 
 	def summary(self, yname=None, xname=None, title=0, alpha=0.05, return_fmt='text'):
 		from statsmodels.iolib.summary import (summary_top, summary_params, summary_return) 
@@ -139,7 +161,7 @@ class NLRQResults(base.LikelihoodModelResults):
 			('Df Residuals:', None), 
 			('Df Model:', None),
 			('Outer Iterations:', ["%d" % self.fit_history['outer_iterations']]), 
-			('Inner Iterations:', ["%d" % self.fit_history['avg_inner_iterations']]) ]
+			('Avg. Inner Iterations:', ["%d" % self.fit_history['avg_inner_iterations']]) ]
 
 		if not title is None:
 			title = "Nonlinear Quantile Regression Results"
@@ -168,14 +190,69 @@ def LocalPolynomial2(xi, x0, par):
 def DLocalPolynomial2(xi, x0, par):
 	return np.concatenate([[1], xi - x0, np.kron(xi - x0, xi - x0)]), True
 	
+def TraceOuter(info):
+	print("{0}. outer iteration: sold = {1:.3f} snew = {2:.3f} par = {3} stepsize={4:.3f}"\
+		.format(info["iteration"], info["sold"], info["snew"], info["par"], info["stepsize"])) 
+
+def TraceInner(info):
+	print("\t{0}. inner iteration: yw = {1:.3f} y.w = {2:.3f} dir = {3}"\
+		.format(info["iteration"], info["yw"], info["ydotw"], info["par"]))
+
+def grid(y, x, tau, h, size):
+	parlen = x.shape[1] * (x.shape[1] + 1) + 1
+	nlrqmodel = NLRQ(y, x, tau=tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=parlen)
+	#nlrqmodel.PostOuterStep += TraceOuter;
+	#nlrqmodel.PostInnerStep += TraceInner;
+
+	for gp in np.linspace(np.min(x), np.max(x), num=size):
+		weights = sp.stats.distributions.norm.pdf((x-gp)/h)
+		nlrqresults = nlrqmodel.fit(x0 = gp, weights = weights) 
+		yield np.concatenate([[gp], nlrqresults.params]).tolist()[0:(2+x.shape[1])]
+
+	#xname = ("mu"+" mu".join(map(str, range(parlen)))).split()
+	#yname = ["y"]
+	#print(nlrqresults.summary(xname=xname, yname=yname))
+			
 def main():
-	data = sm.datasets.longley.load()
-	data.exog = sm.add_constant(data.exog, prepend=False)
-	xname = ["x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-	yname = ["y"]
-	parlen = data.exog.shape[0] * (data.exog.shape[0] + 1) + 1
-	qrresults = NLRQ(data.endog, data.exog, tau=0.9, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=parlen).fit() 
-	print(qrresults.summary(xname=xname, yname=yname))
+
+	result = {} 
+	dosimulation = True 
+	dosomethingaboutit = False
+	gridpoints = 35 
+	bandwidth = 1 
+	taus = [.1, .5, .9]
+
+	if dosimulation:
+		N = 600
+		class data:
+			exog = sp.stats.distributions.uniform.rvs(0, 4*sp.pi, N)
+			endog = sp.sin(exog) + sp.stats.distributions.norm.rvs(0, 0.4, N) * exog/3
+			#endog = sp.sin(exog) + sp.stats.distributions.chi2.rvs(3, -3, size=N) * exog/3
+			exog = exog.reshape(N,1)
+	else:
+		data = sm.datasets.strikes.load()
+
+	if dosomethingaboutit:
+		for x, f0, Df0 in grid(data.endog, data.exog, 0.5, bandwidth, gridpoints):
+			print(("{:+.4f} "*3).format(x, f0, Df0))
+	else:
+		for tau in taus:
+			result[tau] = np.array(list(grid(data.endog, data.exog, tau, bandwidth, gridpoints)))
+
+	fig=plot.figure(1, figsize=(9,13))
+	plot.subplot(211)
+	plot.plot(data.exog, data.endog, 'o')
+	plot.grid(True)	
+	for tau in taus:
+		plot.plot(result[tau][:,0], result[tau][:,1], '-')
+	plot.subplot(212)	
+	plot.grid(True)	
+	for tau in taus:
+		plot.plot(result[tau][:,0], result[tau][:,2], '-')
+	fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
+
+	plot.show()
+
 
 if __name__ == '__main__':
 	main()
