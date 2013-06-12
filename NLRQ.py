@@ -4,6 +4,7 @@ from etrics.Utilities import EventHook
 
 import scipy as sp
 import numpy as np
+import numexpr as ne
 
 import statsmodels.api as sm
 import statsmodels.base.model as base
@@ -14,10 +15,14 @@ from statsmodels.tools.tools import rank
 
 from matplotlib import rc
 from numpy import arange, cos, pi
-#from matplotlib.pyplot import figure, axes, plot, xlabel, ylabel, title, savefig, show
 import pylab as plot
 
 class NLRQ(base.LikelihoodModel):
+	"""
+		This implementation follows the algorithm proposed in 
+		"An interior point algorithm for nonlinear quantile regression" 
+	    by Roger Koenker, Beum J. Park in Journal of Econometrics (1996)
+	"""		
 
 	def __init__(self, endog, exog, **kwargs):
 		super(NLRQ, self).__init__(endog, exog, **kwargs)
@@ -102,10 +107,6 @@ class NLRQ(base.LikelihoodModel):
 		z = None
 		while k < self.maxit and yw - np.dot(y, w) > self.eps:
 			d = np.minimum(tau - w, 1 - tau + w)
-
-			#z = sm.WLS(y, x, weights = d**2, hasconst = False).fit()
-			#print(z.params)
-			#wx = np.array(np.multiply(x, np.kron(np.matrix(np.ones(self.parlen)).T, np.matrix(np.square(d))).T))
 
 			wx, wy = np.multiply(x.T, d).T, np.multiply(y, d)
 			q,r = sp.linalg.qr(wx, mode='economic')
@@ -249,9 +250,9 @@ def main():
 	plot.grid(True)	
 	for tau in taus:
 		plot.plot(result[tau][:,0], result[tau][:,2], '-')
-	fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
 
-	plot.show()
+	#fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
+	#plot.show()
 
 
 if __name__ == '__main__':
