@@ -37,3 +37,17 @@ class EventHook(object):
 def enum(*sequential, **named):
 	enums = dict(zip(sequential, range(len(sequential))), **named)
 	return type('Enum', (), enums)
+
+class Timing:
+	def __init__(self, name):
+		self.name = name
+
+	def __enter__(self):
+		import time
+		self.start = time.time()
+
+	def __exit__(self, type_, value, traceback):
+		import time
+		self.stop = time.time()
+		print("Time for {0}: {1:.3f} ms".format(self.name, (self.stop-self.start)*1000.))
+		return True

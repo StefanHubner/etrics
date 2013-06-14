@@ -1,6 +1,6 @@
 #!/usr/bin/python3.3
 
-from etrics.Utilities import EventHook
+from etrics.Utilities import EventHook, Timing
 
 import scipy as sp
 import numpy as np
@@ -13,7 +13,7 @@ import statsmodels.regression.linear_model as lm
 from statsmodels.tools.decorators import (resettable_cache, cache_readonly, cache_writable)
 from statsmodels.tools.tools import rank
 
-from matplotlib import rc
+from matplotlib import rc, cm
 from numpy import arange, cos, pi
 import pylab as plot
 
@@ -36,7 +36,8 @@ class NLRQ(base.LikelihoodModel):
 		self.df_resid = np.float(self.exog.shape[0] - self.parlen)
 		self.df_model = np.float(self.parlen)
 		
-		self.eps = 10e-07
+		self.eps = 10e-06
+		self.epsinner = 10e-03
 		self.maxit = 100
 		self.beta = 0.97
 		self.par = None
@@ -55,73 +56,82 @@ class NLRQ(base.LikelihoodModel):
 		self.par = np.zeros(self.parlen) # TODO smarter starting values
 
 		w = np.zeros(self.nobs)
-		self.wendog = np.multiply(self.endog, self.weights)
+		self.wendog = ne.evaluate("y * w", local_dict = {'y': self.endog, 'w': self.weights})
+		unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predict(self.par)})
+		snew = np.sum(self.loss(unew))
 
-		snew = np.sum(self.loss(self.wendog - self.predict(self.par)))
 		sold, lam, outer, inner, k = 10e+20, np.array(1.), 0, 0, 0
 
 		while outer <= self.maxit and sold - snew > self.eps:
 			if outer == 0 or not self.linearinpar:
 				self.calculategradient(self.par)
 
-			self.actstep, zw, k  = self.meketon(self.gradient, self.wendog - self.predict(self.par), w, tau = self.tau) 
+			self.actstep, zw, k  = self.meketon(self.gradient, unew, w, tau = self.tau) 
+
 			res = sp.optimize.minimize_scalar(self.step, bounds=(0., 1.), method='bounded')
 			self.par += res.x * self.actstep
-			sold, snew = snew, np.sum(self.loss(self.wendog - self.predict(self.par))) 
+			unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predict(self.par)})
+			sold, snew = snew, np.sum(self.loss(unew))
 
 			q,r = sp.linalg.qr(self.gradient, mode='economic')
-			w = zw - np.dot(self.gradient, np.dot(np.linalg.inv(r), np.dot(q.T, zw)))
+			w = ne.evaluate("zw - zwhat", local_dict = \
+				{'zw':zw, 'zwhat':np.dot(self.gradient, np.dot(np.linalg.inv(r), np.dot(q.T, zw)))})
 
-			w1 = np.max(np.maximum(w, 0))
+			w1 = np.max(w) # original: w1 = np.max(np.maximum(w, 0))
 			if w1 > self.tau:
-				w *= np.divide(self.tau, w1 + self.eps)
-			w0 = np.max(np.maximum(-w, 0))
+				w = ne.evaluate("tau * w / w1", local_dict = {'w': w, 'tau':self.tau, 'w1':w1 + self.eps})
+			w0 = -np.min(w) # original: w0 = np.max(np.maximum(-w, 0))
 			if w0 > 1 - self.tau:
-				w *= np.divide(1 - self.tau, w0 + self.eps)
-			
+				w = ne.evaluate("(1-tau) * w / w0", local_dict = {'w': w, 'tau':self.tau, 'w0':w0 + self.eps})
+				
 			inner += k
 			outer += 1
-			self.PostOuterStep.Fire({"iteration":outer, "par":self.par, "sold":sold, "snew":snew, "stepsize":res.x})
+			self.PostOuterStep.Fire({"iteration":outer, "par":self.par, "sold":sold, "snew":snew, "stepsize":res.x, "inner":k})
 				
 		self.normalized_cov_params =  np.identity(self.parlen)
-		res = NLRQResults(self, self.par, np.identity(self.parlen))
+		res = NLRQResults(self, self.par, self.normalized_cov_params)
 		res.fit_history['outer_iterations'] = outer
 		res.fit_history['avg_inner_iterations'] = inner/outer 
 
 		return NLRQResultsWrapper(res)
 
-	def calculategradient(self, par):
+	def calculategradient(self, par): # TODO: takes 60ms 3/4th of the time
 		for i in range(int(self.nobs)):
 			self.gradient[i,], self.linearinpar = self.Df(self.exog[i,], self.x0, self.par)
 			self.gradient[i,] *= self.weights[i]
 
 	def predict(self, params, exog=None):
-		return np.dot(self.gradient, params)
+		if exog is None:
+			exog = self.exog
+
+		return np.dot(self.gradient, params) # TODO: predict quadratic form,
+		#return self.f(exog, self.x0, params) 
 
 	def loss(self, residuals):
-		return self.tau * np.maximum(residuals, 0) - (1 - self.tau) * np.minimum(residuals, 0)
+		return ne.evaluate("u * (tau - (u < 0))", local_dict = {'tau':self.tau, 'u':residuals})
+		#return self.tau * np.maximum(residuals, 0) - (1 - self.tau) * np.minimum(residuals, 0)
 
 	def meketon(self, x, y, w, tau):
 		yw = 10e+20
 		k = 0
 		z = None
-		while k < self.maxit and yw - np.dot(y, w) > self.eps:
+		while k < self.maxit and yw - np.dot(y, w) > self.epsinner:
 			d = np.minimum(tau - w, 1 - tau + w)
 
 			wx, wy = np.multiply(x.T, d).T, np.multiply(y, d)
 			q,r = sp.linalg.qr(wx, mode='economic')
 			wbeta = np.dot(np.linalg.inv(r), np.dot(q.T, wy))
-			wresid = y - np.dot(x, wbeta)
+			wresid = ne.evaluate("y - yhat", local_dict = {'y':y, 'yhat':np.dot(x, wbeta)})
 			
 			yw = np.sum(self.loss(wresid))
-			s = wresid * np.square(d) 
+			s = ne.evaluate("wresid * d**2") 
 			alpha = np.max(np.concatenate([[self.eps], np.maximum( np.divide(s, tau - w), np.divide(-s, 1 - tau + w))]))
 			w += self.beta/alpha * s
 			k += 1
 			self.PostInnerStep.Fire({"iteration":k, "par":wbeta, "yw":yw, "ydotw":np.dot(y,w)})
 
 		return wbeta, w, k
-	
+		
 	def step(self, lam):
 		return np.sum(self.loss(self.wendog - self.predict(self.par + lam * self.actstep)))
 
@@ -180,20 +190,19 @@ class NLRQResultsWrapper(lm.RegressionResultsWrapper):
 
 wrap.populate_wrapper(NLRQResultsWrapper, NLRQResults)	
 
-def LocalPolynomial2(xi, x0, par):
-	K = int(1/2+np.sqrt(l-3/4))
+def LocalPolynomial2(x, x0, par):
+	K = int(1/2+np.sqrt(x.shape[1]-3/4))
 	mu0 = par[0]
-	mu1 = par[1:K+1]
+	mu1 = par[1:K+1].reshape(K, 1)
 	mu2 = par[K+1:].reshape(K, K)
-
-	return mu0 + np.dot(mu1, xi - x0) + (xi - x0).T * mu2 * (xi - x0) 
+	return (mu0 + np.dot(x-x0, mu1) + np.sum(np.multiply(np.dot(x-x0, mu2), x-x0), axis=1).reshape(x.shape)).reshape(x.shape[0])
 
 def DLocalPolynomial2(xi, x0, par):
 	return np.concatenate([[1], xi - x0, np.kron(xi - x0, xi - x0)]), True
 	
 def TraceOuter(info):
-	print("{0}. outer iteration: sold = {1:.3f} snew = {2:.3f} par = {3} stepsize={4:.3f}"\
-		.format(info["iteration"], info["sold"], info["snew"], info["par"], info["stepsize"])) 
+	print("{0}. outer iteration: sold = {1:.3f} snew = {2:.3f} par = {3} stepsize={4:.3f} innersteps={5}"\
+		.format(info["iteration"], info["sold"], info["snew"], info["par"], info["stepsize"], info["inner"])) 
 
 def TraceInner(info):
 	print("\t{0}. inner iteration: yw = {1:.3f} y.w = {2:.3f} dir = {3}"\
@@ -206,7 +215,9 @@ def grid(y, x, tau, h, size):
 	#nlrqmodel.PostInnerStep += TraceInner;
 
 	for gp in np.linspace(np.min(x), np.max(x), num=size):
-		weights = sp.stats.distributions.norm.pdf((x-gp)/h)
+		dist = np.sum(np.abs(x-gp)**2,axis=1)**.5
+		weights = sp.stats.distributions.norm.pdf(dist/h)
+		#with Timing("fit"):
 		nlrqresults = nlrqmodel.fit(x0 = gp, weights = weights) 
 		yield np.concatenate([[gp], nlrqresults.params]).tolist()[0:(2+x.shape[1])]
 
@@ -214,24 +225,38 @@ def grid(y, x, tau, h, size):
 	#yname = ["y"]
 	#print(nlrqresults.summary(xname=xname, yname=yname))
 			
+def grid2d(y, x, tau, h, gridw, gridp):
+	parlen = x.shape[1] * (x.shape[1] + 1) + 1
+	nlrqmodel = NLRQ(y, x, tau=tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=parlen)
+
+	for w0 in gridw:
+		for p0 in gridp:
+			dist = np.sum(np.abs(x-[w0, p0])**2,axis=1)**.5
+			weights = sp.stats.distributions.norm.pdf(dist/h)
+			nlrqresults = nlrqmodel.fit(x0 = [w0, p0], weights = weights) 
+			yield np.concatenate([np.array([w0, p0]), nlrqresults.params]).tolist()
+
 def main():
 
 	result = {} 
 	dosimulation = True 
 	dosomethingaboutit = False
-	gridpoints = 35 
+	gridpoints = 5 
 	bandwidth = 1 
 	taus = [.1, .5, .9]
 
 	if dosimulation:
 		N = 600
 		class data:
-			exog = sp.stats.distributions.uniform.rvs(0, 4*sp.pi, N)
-			endog = sp.sin(exog) + sp.stats.distributions.norm.rvs(0, 0.4, N) * exog/3
-			#endog = sp.sin(exog) + sp.stats.distributions.chi2.rvs(3, -3, size=N) * exog/3
-			exog = exog.reshape(N,1)
+			#exog = sp.stats.distributions.uniform.rvs(0, 4*sp.pi, N)
+			#endog = sp.sin(exog) + sp.stats.distributions.norm.rvs(0, 0.4, N) * exog/3
+
+			exog = sp.stats.distributions.uniform.rvs(0, 1, 2*N).reshape(N, 2)
+			endog = np.divide(exog[:,0], exog[:,1])
 	else:
 		data = sm.datasets.strikes.load()
+
+	#print(LocalPolynomial2(data.exog, np.median(data.exog, axis=0), np.array([1., 2., 3.]) )[1:4,:])
 
 	if dosomethingaboutit:
 		for x, f0, Df0 in grid(data.endog, data.exog, 0.5, bandwidth, gridpoints):
@@ -252,8 +277,45 @@ def main():
 		plot.plot(result[tau][:,0], result[tau][:,2], '-')
 
 	#fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
-	#plot.show()
+	plot.show()
 
+
+def main1():
+	from mpl_toolkits.mplot3d import Axes3D
+	result = {} 
+	gridpoints = 7 
+	bandwidth = 1 
+	taus = [.1, .9]
+	N = 600
+	domain =[1,3]
+	c = {.1:'b',.5:'g',.9:'r'}
+
+	class data:
+		exog = sp.stats.distributions.uniform.rvs(domain[0], domain[1], 2*N).reshape(N, 2)
+		endog = np.divide(exog[:,0], exog[:,1])+ sp.stats.distributions.norm.rvs(0, 0.4, N)
+
+	w0min, p0min = np.min(data.exog, axis=0)
+	w0max, p0max = np.max(data.exog, axis=0)
+	gridw = np.linspace(w0min, w0max, num=gridpoints)
+	gridp = np.linspace(p0min, p0max, num=gridpoints)
+	for tau in taus:
+		result[tau] = np.array(list(grid2d(data.endog, data.exog, tau, bandwidth, gridw, gridp)))
+	fig=plot.figure(1, figsize=(9,13))
+	ax = fig.add_subplot(211, projection='3d')
+	ax2 = fig.add_subplot(212, projection='3d')
+	#ax.scatter(data.exog[:,0], data.exog[:,1], data.endog)
+	plot.grid(True)	
+	#plot.plot(data.exog, data.endog, 'o')
+	w,p = np.meshgrid(gridw, gridp)
+	for tau in taus:
+		#plot.plot(result[tau][:,0], result[tau][:,1]*result[tau][:,2]+ result[tau][:,3], '-')
+		#ax.plot_wireframe(w, p, result[tau][:,2])
+		z = result[tau][:,2].reshape(gridpoints, gridpoints)
+		ax.plot_wireframe(w, p, z, color=c[tau])
+		z2 = (result[tau][:,2]*result[tau][:,3]+result[tau][:,4]).reshape(gridpoints, gridpoints)
+		ax2.plot_wireframe(w, p, z2, color=c[tau])
+	fig.savefig('cd.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
+	plot.show()
 
 if __name__ == '__main__':
-	main()
+	main1()
