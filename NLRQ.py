@@ -57,7 +57,7 @@ class NLRQ(base.LikelihoodModel):
 
 		w = np.zeros(self.nobs)
 		self.wendog = ne.evaluate("y * w", local_dict = {'y': self.endog, 'w': self.weights})
-		unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predict(self.par)})
+		unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predictlinear(self.par)})
 		snew = np.sum(self.loss(unew))
 
 		sold, lam, outer, inner, k = 10e+20, np.array(1.), 0, 0, 0
@@ -70,7 +70,7 @@ class NLRQ(base.LikelihoodModel):
 
 			res = sp.optimize.minimize_scalar(self.step, bounds=(0., 1.), method='bounded')
 			self.par += res.x * self.actstep
-			unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predict(self.par)})
+			unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predictlinear(self.par)})
 			sold, snew = snew, np.sum(self.loss(unew))
 
 			q,r = sp.linalg.qr(self.gradient, mode='economic')
@@ -95,17 +95,17 @@ class NLRQ(base.LikelihoodModel):
 
 		return NLRQResultsWrapper(res)
 
-	def calculategradient(self, par): # TODO: takes 60ms 3/4th of the time
-		for i in range(int(self.nobs)):
-			self.gradient[i,], self.linearinpar = self.Df(self.exog[i,], self.x0, self.par)
-			self.gradient[i,] *= self.weights[i]
+	def calculategradient(self, par):
+		self.gradient, self.linearinpar = self.Df(self.exog, self.x0, self.par)
+		self.gradient *= self.weights.reshape(self.weights.shape[0], 1)
 
-	def predict(self, params, exog=None):
+	def predictlinear(self, params):
+		return np.dot(self.gradient, params)
+	
+	def predict(self, params, exog = None):
 		if exog is None:
 			exog = self.exog
-
-		return np.dot(self.gradient, params) # TODO: predict quadratic form,
-		#return self.f(exog, self.x0, params) 
+		return self.f(exog, self.x0, params) 
 
 	def loss(self, residuals):
 		return ne.evaluate("u * (tau - (u < 0))", local_dict = {'tau':self.tau, 'u':residuals})
@@ -133,7 +133,7 @@ class NLRQ(base.LikelihoodModel):
 		return wbeta, w, k
 		
 	def step(self, lam):
-		return np.sum(self.loss(self.wendog - self.predict(self.par + lam * self.actstep)))
+		return np.sum(self.loss(self.wendog - self.predictlinear(self.par + lam * self.actstep)))
 
 class NLRQResults(base.LikelihoodModelResults):
 	fit_history = {}
@@ -197,9 +197,11 @@ def LocalPolynomial2(x, x0, par):
 	mu2 = par[K+1:].reshape(K, K)
 	return (mu0 + np.dot(x-x0, mu1) + np.sum(np.multiply(np.dot(x-x0, mu2), x-x0), axis=1).reshape(x.shape)).reshape(x.shape[0])
 
-def DLocalPolynomial2(xi, x0, par):
-	return np.concatenate([[1], xi - x0, np.kron(xi - x0, xi - x0)]), True
-	
+def DLocalPolynomial2(x, x0, par):
+	XkronX = np.multiply(np.kron(x-x0, np.ones(x.shape[1]).reshape(1,x.shape[1])), \
+		np.kron(np.ones(x.shape[1]).reshape(1,x.shape[1]), x-x0))
+	return np.concatenate([np.ones(x.shape[0]).reshape(x.shape[0], 1),x-x0,XkronX], axis=1), True	
+
 def TraceOuter(info):
 	print("{0}. outer iteration: sold = {1:.3f} snew = {2:.3f} par = {3} stepsize={4:.3f} innersteps={5}"\
 		.format(info["iteration"], info["sold"], info["snew"], info["par"], info["stepsize"], info["inner"])) 
@@ -225,38 +227,24 @@ def grid(y, x, tau, h, size):
 	#yname = ["y"]
 	#print(nlrqresults.summary(xname=xname, yname=yname))
 			
-def grid2d(y, x, tau, h, gridw, gridp):
-	parlen = x.shape[1] * (x.shape[1] + 1) + 1
-	nlrqmodel = NLRQ(y, x, tau=tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=parlen)
-
-	for w0 in gridw:
-		for p0 in gridp:
-			dist = np.sum(np.abs(x-[w0, p0])**2,axis=1)**.5
-			weights = sp.stats.distributions.norm.pdf(dist/h)
-			nlrqresults = nlrqmodel.fit(x0 = [w0, p0], weights = weights) 
-			yield np.concatenate([np.array([w0, p0]), nlrqresults.params]).tolist()
 
 def main():
 
 	result = {} 
 	dosimulation = True 
 	dosomethingaboutit = False
-	gridpoints = 5 
+	gridpoints = 25 
 	bandwidth = 1 
 	taus = [.1, .5, .9]
 
 	if dosimulation:
 		N = 600
 		class data:
-			#exog = sp.stats.distributions.uniform.rvs(0, 4*sp.pi, N)
-			#endog = sp.sin(exog) + sp.stats.distributions.norm.rvs(0, 0.4, N) * exog/3
-
-			exog = sp.stats.distributions.uniform.rvs(0, 1, 2*N).reshape(N, 2)
-			endog = np.divide(exog[:,0], exog[:,1])
+			exog = sp.stats.distributions.uniform.rvs(0, 4*sp.pi, N)
+			endog = sp.sin(exog) + sp.stats.distributions.norm.rvs(0, 0.4, N) * (exog**0.5)
+			exog = exog.reshape(N, 1)
 	else:
 		data = sm.datasets.strikes.load()
-
-	#print(LocalPolynomial2(data.exog, np.median(data.exog, axis=0), np.array([1., 2., 3.]) )[1:4,:])
 
 	if dosomethingaboutit:
 		for x, f0, Df0 in grid(data.endog, data.exog, 0.5, bandwidth, gridpoints):
@@ -276,46 +264,10 @@ def main():
 	for tau in taus:
 		plot.plot(result[tau][:,0], result[tau][:,2], '-')
 
-	#fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
+	fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
 	plot.show()
 
 
-def main1():
-	from mpl_toolkits.mplot3d import Axes3D
-	result = {} 
-	gridpoints = 7 
-	bandwidth = 1 
-	taus = [.1, .9]
-	N = 600
-	domain =[1,3]
-	c = {.1:'b',.5:'g',.9:'r'}
-
-	class data:
-		exog = sp.stats.distributions.uniform.rvs(domain[0], domain[1], 2*N).reshape(N, 2)
-		endog = np.divide(exog[:,0], exog[:,1])+ sp.stats.distributions.norm.rvs(0, 0.4, N)
-
-	w0min, p0min = np.min(data.exog, axis=0)
-	w0max, p0max = np.max(data.exog, axis=0)
-	gridw = np.linspace(w0min, w0max, num=gridpoints)
-	gridp = np.linspace(p0min, p0max, num=gridpoints)
-	for tau in taus:
-		result[tau] = np.array(list(grid2d(data.endog, data.exog, tau, bandwidth, gridw, gridp)))
-	fig=plot.figure(1, figsize=(9,13))
-	ax = fig.add_subplot(211, projection='3d')
-	ax2 = fig.add_subplot(212, projection='3d')
-	#ax.scatter(data.exog[:,0], data.exog[:,1], data.endog)
-	plot.grid(True)	
-	#plot.plot(data.exog, data.endog, 'o')
-	w,p = np.meshgrid(gridw, gridp)
-	for tau in taus:
-		#plot.plot(result[tau][:,0], result[tau][:,1]*result[tau][:,2]+ result[tau][:,3], '-')
-		#ax.plot_wireframe(w, p, result[tau][:,2])
-		z = result[tau][:,2].reshape(gridpoints, gridpoints)
-		ax.plot_wireframe(w, p, z, color=c[tau])
-		z2 = (result[tau][:,2]*result[tau][:,3]+result[tau][:,4]).reshape(gridpoints, gridpoints)
-		ax2.plot_wireframe(w, p, z2, color=c[tau])
-	fig.savefig('cd.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
-	plot.show()
 
 if __name__ == '__main__':
-	main1()
+	main()
