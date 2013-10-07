@@ -26,12 +26,14 @@ class NLRQSystem:
 		L = Omega.shape[0]
 		K = self.exog.shape[1]
 		Lambda = np.zeros(L*(K+1)).reshape(L, K+1)
+		self.resid = np.zeros(self.exog.shape[0]*L).reshape(self.exog.shape[0], L)
 
 		for i in range(L):
 			y = np.dot(self.endog, Omega[i,:].T).reshape(self.endog.shape[0])
 			nlrqmodel = NLRQ(y, self.exog, tau=self.tau, f=self.LocalPolynomial2, Df=self.DLocalPolynomial2, parlen=self.parlen)
 			nlrqresults = nlrqmodel.fit(x0 = x0, weights = weights) 
 			Lambda[i,:] = nlrqresults.params[0:K+1]
+			self.resid[:,i] = nlrqresults.resid.T
 	
 		b = Lambda.T.reshape(L*(K+1)) # b=vec(Lambda)
 		A = np.kron(np.identity(K+1), Omega) 
@@ -43,6 +45,9 @@ class NLRQSystem:
 		print(mu1)
 
 		return x
+
+	def residuals(self):
+		return self.resid
 
 	def gridball(self, dimensions, sizeperdim):
 		eps = 0.05
@@ -81,7 +86,7 @@ def grid(y, x, tau, h, sizeperdim):
 			yield np.concatenate([x0, par]).tolist()
 
 class RandomSystem:
-	Specification = enum('Linear', 'Quadratic')
+	Specification = enum('Linear', 'Quadratic', 'Individual')
 	
 	@property
 	def exog(self):
@@ -94,24 +99,34 @@ class RandomSystem:
 	def __init__(self, N, K, theta0):
 		self.domain = [1,3]
 		self.theta0 = theta0
-		self.K = K
+		self.K = self.Ktot = K
 		self.N = N
 		self._exog = np.zeros(N*K).reshape(N, K)
 		self._endog = np.zeros(N*K).reshape(N, K)
+		self.knownforms = {RandomSystem.Specification.Linear:self.Linear, RandomSystem.Specification.Quadratic:self.Quadratic}
 	
-	def F0(self):
-		return {RandomSystem.Specification.Linear:self.Linear, RandomSystem.Specification.Quadratic:self.Quadratic}
-
+	def F0(self, spec):
+		if spec in self.knownforms:
+			return self.knownforms[spec]
+		else:
+			return self.Individual
+	
+	def RegisterNewFunctionalForm(self):
+		self.knownforms[RandomSystem.Specification.Individual] = self.Individual
+			
 	def Generate(self, spec, vcov):
 		for i in range(self.N):
-			self._exog[i,:] = sp.stats.distributions.uniform.rvs(self.domain[0], self.domain[1]-self.domain[0], self.K)
+			self._exog[i,0:self.K] = sp.stats.distributions.uniform.rvs(self.domain[0], self.domain[1]-self.domain[0], self.K)
 			eps = np.random.multivariate_normal([0]*self.K, vcov) if vcov is not None else sp.stats.distributions.norm.rvs(0, 0.4, self.K)
 			
-			self._endog[i,:] = (self.F0()[spec])(self._exog[i,:], self.theta0 + (eps if vcov is not None else 0)) + (eps if vcov is None else 0)
+			self._endog[i,:] = (self.F0(spec))(self._exog[i,:], self.theta0 + (eps if vcov is not None else 0)) + (eps if vcov is None else 0)
+
+	def AddFixed(self, fixed):
+		self._exog = np.hstack([self._exog, fixed])
+		self.Ktot = self.exog.shape[1] - self.K
 
 	def Linear(self, xi, theta):
-		return np.maximum( self.domain[1]*np.ones(self.K) + np.dot(theta, xi), 0.)
+		return np.maximum( self.domain[1]*np.ones(self.K) + np.dot(theta, xi[0:self.K]), 0.)
 
 	def Quadratic(self, xi, theta):			
-		return (self.domain[1]**2)*np.ones(self.K) + np.dot(theta, xi) + .2*np.dot(np.dot(xi.T, theta), xi) 
-
+		return (self.domain[1]**2)*np.ones(self.K) + np.dot(theta, xi[0:self.K]) + .2*np.dot(np.dot(xi[0:self.K].T, theta), xi[0:self.K]) 

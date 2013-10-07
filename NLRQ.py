@@ -102,6 +102,9 @@ class NLRQ(base.LikelihoodModel):
 	def predictlinear(self, params):
 		return np.dot(self.gradient, params)
 	
+	def residuals(self, params):
+		return self.endog - np.dot(self.gradient, params)
+	
 	def predict(self, params, exog = None):
 		if exog is None:
 			exog = self.exog
@@ -150,7 +153,8 @@ class NLRQResults(base.LikelihoodModelResults):
 
 	@cache_readonly
 	def resid(self):
-		return self.model.wendog - self.fittedvalues 
+		#return self.model.wendog - self.fittedvalues 
+		return self.model.residuals(self.params) 
 
 	@cache_readonly
 	def varcov(self):
