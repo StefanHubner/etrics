@@ -52,7 +52,7 @@ class Timing:
 		import time
 		self.stop = time.time()
 		print("Time for {0}: {1:.3f} ms".format(self.name, (self.stop-self.start)*1000.))
-		return True
+		#return True
 
 def cartesian(arrays, out=None):
 	arrays = [np.asarray(x) for x in arrays]
