@@ -103,7 +103,8 @@ class NLRQ(base.LikelihoodModel):
 		return np.dot(self.gradient, params)
 	
 	def residuals(self, params):
-		return self.endog - np.dot(self.gradient, params)
+		#return self.endog - np.dot(self.gradient, params)
+		return self.wendog - self.predictlinear(params)
 	
 	def predict(self, params, exog = None):
 		if exog is None:
