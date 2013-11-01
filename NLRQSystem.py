@@ -64,28 +64,34 @@ class NLRQSystem:
 		#print(mu0)
 		#print(mu1)
 
-		return x
+		return mu0, mu1 
 
-	def fitgrid(self, h, sizeperdim): #TODO check dim vs dimy
-		dim = self.exog.shape[1]
+	def fitgrid(self, h, sizeperdim, fixdim = {}): #TODO check dim vs dimy
+		#dim = self.exog.shape[1] - len(fixdim)
+		x0 = np.empty(self.exog.shape[1])
+		grididcs = [i for i in range(self.exog.shape[1]) if i not in fixdim]
 		dimy = self.endog.shape[1]
-		xmins, xmaxs = np.min(self.exog, axis=0), np.max(self.exog, axis=0)
+		#xmins, xmaxs = np.min(self.exog, axis=0), np.max(self.exog, axis=0)
+		xq10s, xq90s = np.percentile(self.exog, 10, axis=0), np.percentile(self.exog, 90, axis=0)
 		grid = []
 		j = 0
-		for i in range(dim): 
-			grid.append(np.linspace(xmins[i], xmaxs[i], sizeperdim))
+		for i in grididcs:
+			grid.append(np.linspace(xq10s[i], xq90s[i], sizeperdim))
 		glen = len(cartesian(grid))
 		residweights = np.empty((self.exog.shape[0], glen)) 
 		resids = np.empty((self.exog.shape[0], dimy*glen)) 
-		for x0 in cartesian(grid):
+		for x0r in cartesian(grid):
+			x0[grididcs] = x0r
+			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
 			dist = np.sum(np.abs(self.exog-x0)**2, axis=1)**.5
 			weights = sp.stats.distributions.norm.pdf(dist/h)
 			residweights[:,j] = weights
 			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1])):
-				par = self.fit(x0 = x0, weights = weights) 
+				fct, grad = self.fit(x0 = x0, weights = weights) 
+				print(fct)
 				#resids[:,j*dimy:(j+1)*dimy] = self.resid
 				resids[:,np.array(range(dimy))*glen+j] = self.resid
-				yield np.concatenate([x0, par]).tolist()
+				yield np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 0).flatten(0)]).tolist()
 			j += 1	
 		#print(resids.shape)	
 		residweights = np.divide(residweights.T, np.sum(residweights, axis=1)).T
@@ -125,7 +131,7 @@ class RandomSystem:
 	@property
 	def endog(self):
 		return self._endog
-
+	
 	def __init__(self, N, K, dimY, theta0):
 		self.theta0 = theta0
 		self.dimY = dimY
@@ -134,9 +140,10 @@ class RandomSystem:
 		self._exog = np.empty((N, K))
 		self._endog = np.empty((N, dimY))
 		self._unobs = np.empty((N, dimY))
+		self._names = []
+		self._ynames = []
 		self.knownforms = {RandomSystem.Specification.Linear:self.Linear,\
-			RandomSystem.Specification.Quadratic:self.Quadratic, \
-			RandomSystem.Specification.CobbDouglas:self.CobbDouglas}
+			RandomSystem.Specification.Quadratic:self.Quadratic}
 	
 	def F0(self, spec):
 		if spec in self.knownforms:
@@ -144,10 +151,14 @@ class RandomSystem:
 		else:
 			return self.Individual
 	
-	def RegisterNewFunctionalForm(self):
-		self.knownforms[RandomSystem.Specification.Individual] = self.Individual
-			
-	def GenerateObserved(self, dist):
+	def ExogenousByName(self, name):
+		return self.exog[:,self._names.index(name)].reshape(self.N, 1)
+
+	def EndogenousByName(self, name):
+		return self.endog[:,self._ynames.index(name)].reshape(self.N, 1)
+
+	def GenerateObserved(self, dist, names):
+		self._names += names
 		for i in range(self.N):
 			self._exog[i,0:self.K] = dist(self.K)
 
@@ -155,32 +166,43 @@ class RandomSystem:
 		for i in range(self.N):
 			self._unobs[i,0:self.dimY] = dist(self.dimY)
 		
-	def CalculateEndogenous(self, spec):
+	def CalculateEndogenous(self, spec, names):
+		self._ynames += names
 		for i in range(self.N):
-			self._endog[i,:] = (self.F0(spec))(self._exog[i,:], self._unobs[i,:], self.theta0)
+			self._endog[i,0:self.dimY] = (self.F0(spec))(self._exog[i,:], self._unobs[i,:], self.theta0)
+	def AddConstrainedEndogenous(self, cons, name): 
+		# row by row since it's more flexible and intuitive
+		newcol = np.empty((self.N, 1))
+		for i in range(self.N):
+			newcol[i] = cons(self.exog[i], self.endog[i])
+		self.AddEndogenous(newcol, name)
+		print(self._ynames)
+
 		
-	def AddObserved(self, fixed):
+	def AddEndogenous(self, fixed, names):
+		self._ynames += names
+		self._endog = np.hstack([self._endog, fixed])
+		self.dimY += 1
+
+	def AddObserved(self, fixed, names):
+		self._names += names
 		self._exog = np.hstack([self._exog, fixed])
-		self.K += 1
+		self.K += fixed.shape[1] 
 	
 	def AddUnobserved(self, fixed):
 		self._unobs = np.hstack([self._unobs, fixed])
 		self.Kunobs += 1
 
 	def Linear(self, xi, eps, theta):
-		return np.maximum( np.max(self._exog)*np.ones(self.K) \
-			+ np.dot(theta, xi[0:self.K]) \
-			+ eps[0:self.K], 0.)
+		K = len(xi) # self.K
+		return np.maximum( np.max(self._exog)*np.ones(K) \
+			+ np.dot(theta, xi[0:K]) \
+			+ eps[0:self.dimY], 0.)
 
 	def Quadratic(self, xi, eps, theta):			
-		return (np.max(self._exog)**2)*np.ones(self.K) \
-			+ np.dot(theta, xi[0:self.K]) \
-			+ .2*np.dot(np.dot(xi[0:self.K].T, theta), xi[0:self.K]) \
-			+ eps[0:self.K]
+		K = len(xi) # self.K
+		return (np.max(self._exog)**2)*np.ones(K) \
+			+ np.dot(theta, xi[0:K]) \
+			+ .2*np.dot(np.dot(xi[0:K].T, theta), xi[0:K]) \
+			+ eps[0:self.dimY]
 	
-	def CobbDouglas(self, xi, eps, theta):
-		w = xi[0]
-		p = xi[-self.K+1:]
-		theta += eps[:-1]
-		return w/p*np.hstack([theta, 1-np.sum(theta)])
-
