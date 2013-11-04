@@ -1,13 +1,10 @@
-#!/usr/bin/python3
-
-from etrics.NLRQ import NLRQ
+from etrics.NLRQ import NLRQ, LocalPolynomial2, DLocalPolynomial2, TraceInner, TraceOuter
 from etrics.Utilities import cartesian, Timing, enum
 from scipy.stats import norm, scoreatpercentile
 import numpy as np
 import scipy as sp
 from fractions import Fraction
 import statsmodels.api as models
-
 
 class NLRQSystem:
 	def __init__(self, endog, exog, tau, componentwise):
@@ -50,7 +47,10 @@ class NLRQSystem:
 
 		for i in range(L):
 			y = np.dot(self.endog, Omega[i,:].T).reshape(self.endog.shape[0])
-			nlrqmodel = NLRQ(y, self.exog, tau=self.tau, f=self.LocalPolynomial2, Df=self.DLocalPolynomial2, parlen=self.parlen)
+			nlrqmodel = NLRQ(y, self.exog, tau=self.tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=self.parlen)
+
+			#nlrqmodel.PostOuterStep += TraceOuter;
+			#nlrqmodel.PostInnerStep += TraceInner;
 			nlrqresults = nlrqmodel.fit(x0 = x0, weights = weights) 
 			Lambda[i,:] = nlrqresults.params[0:K+1]
 			self.resid[:,i] = nlrqresults.resid.T
@@ -86,9 +86,8 @@ class NLRQSystem:
 			dist = np.sum(np.abs(self.exog-x0)**2, axis=1)**.5
 			weights = sp.stats.distributions.norm.pdf(dist/h)
 			residweights[:,j] = weights
-			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1])):
+			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1]), False):
 				fct, grad = self.fit(x0 = x0, weights = weights) 
-				print(fct)
 				#resids[:,j*dimy:(j+1)*dimy] = self.resid
 				resids[:,np.array(range(dimy))*glen+j] = self.resid
 				yield np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 0).flatten(0)]).tolist()
@@ -109,20 +108,8 @@ class NLRQSystem:
 		x2y2=np.array(x2y2)
 		return np.sqrt(x2y2[np.where(np.all(x2y2>=0, axis=1))])
 				
-	def LocalPolynomial2(self, x, x0, par):
-		K = int(1/2+np.sqrt(x.shape[1]-3/4))
-		mu0 = par[0]
-		mu1 = par[1:K+1].reshape(K, 1)
-		mu2 = par[K+1:].reshape(K, K)
-		return (mu0 + np.dot(x-x0, mu1) + np.sum(np.multiply(np.dot(x-x0, mu2), x-x0), axis=1).reshape(x.shape)).reshape(x.shape[0])
-	
-	def DLocalPolynomial2(self, x, x0, par):
-		XkronX = np.multiply(np.kron(x-x0, np.ones(x.shape[1]).reshape(1,x.shape[1])), \
-			np.kron(np.ones(x.shape[1]).reshape(1,x.shape[1]), x-x0))
-		return np.concatenate([np.ones(x.shape[0]).reshape(x.shape[0], 1),x-x0,XkronX], axis=1), True	
-
 class RandomSystem:
-	Specification = enum('Linear', 'Quadratic', 'CobbDouglas', 'Individual')
+	Specification = enum('Linear', 'Quadratic', 'Individual')
 	
 	@property
 	def exog(self):
@@ -135,8 +122,8 @@ class RandomSystem:
 	def __init__(self, N, K, dimY, theta0):
 		self.theta0 = theta0
 		self.dimY = dimY
-		self.K = self.Kunobs = K
 		self.N = N
+		self.K = K
 		self._exog = np.empty((N, K))
 		self._endog = np.empty((N, dimY))
 		self._unobs = np.empty((N, dimY))
@@ -157,14 +144,14 @@ class RandomSystem:
 	def EndogenousByName(self, name):
 		return self.endog[:,self._ynames.index(name)].reshape(self.N, 1)
 
-	def GenerateObserved(self, dist, names):
+	def GenerateObserved(self, dists, names):
 		self._names += names
 		for i in range(self.N):
-			self._exog[i,0:self.K] = dist(self.K)
+			self._exog[i,:] = np.array([pdf() for pdf in dists])
 
-	def GenerateUnobserved(self, dist):
+	def GenerateUnobserved(self, dists):
 		for i in range(self.N):
-			self._unobs[i,0:self.dimY] = dist(self.dimY)
+			self._unobs[i,:] = np.array([pdf() for pdf in dists])
 		
 	def CalculateEndogenous(self, spec, names):
 		self._ynames += names
@@ -176,8 +163,6 @@ class RandomSystem:
 		for i in range(self.N):
 			newcol[i] = cons(self.exog[i], self.endog[i])
 		self.AddEndogenous(newcol, name)
-		print(self._ynames)
-
 		
 	def AddEndogenous(self, fixed, names):
 		self._ynames += names
@@ -187,11 +172,17 @@ class RandomSystem:
 	def AddObserved(self, fixed, names):
 		self._names += names
 		self._exog = np.hstack([self._exog, fixed])
-		self.K += fixed.shape[1] 
+		self.K += 1
 	
 	def AddUnobserved(self, fixed):
 		self._unobs = np.hstack([self._unobs, fixed])
-		self.Kunobs += 1
+
+	def PrintDescriptive(self):
+		print("Endogenous variables: ") 
+		print([self._ynames[i] +": "+str(np.average(self.endog[:,i])) for i in range(self.dimY)])
+		print("Exogenous variables: ") 
+		print([self._names[i] +": "+str(np.average(self.exog[:,i])) for i in range(self.K)])
+
 
 	def Linear(self, xi, eps, theta):
 		K = len(xi) # self.K
@@ -201,8 +192,11 @@ class RandomSystem:
 
 	def Quadratic(self, xi, eps, theta):			
 		K = len(xi) # self.K
-		return (np.max(self._exog)**2)*np.ones(K) \
-			+ np.dot(theta, xi[0:K]) \
+		return np.dot(theta, xi[0:K]) \
 			+ .2*np.dot(np.dot(xi[0:K].T, theta), xi[0:K]) \
 			+ eps[0:self.dimY]
+		#return (np.max(self._exog)**2)*np.ones(K) \
+		#	+ np.dot(theta, xi[0:K]) \
+		#	+ .2*np.dot(np.dot(xi[0:K].T, theta), xi[0:K]) \
+		#	+ eps[0:self.dimY]
 	

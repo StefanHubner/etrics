@@ -1,5 +1,3 @@
-#!/usr/bin/python3.3
-
 from etrics.Utilities import EventHook, Timing
 
 import scipy as sp
@@ -215,7 +213,7 @@ def TraceInner(info):
 	print("\t{0}. inner iteration: yw = {1:.3f} y.w = {2:.3f} dir = {3}"\
 		.format(info["iteration"], info["yw"], info["ydotw"], info["par"]))
 
-def grid(y, x, tau, h, size):
+def grid1d(y, x, tau, h, size):
 	parlen = x.shape[1] * (x.shape[1] + 1) + 1
 	nlrqmodel = NLRQ(y, x, tau=tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=parlen)
 	#nlrqmodel.PostOuterStep += TraceOuter;
@@ -231,7 +229,6 @@ def grid(y, x, tau, h, size):
 	#xname = ("mu"+" mu".join(map(str, range(parlen)))).split()
 	#yname = ["y"]
 	#print(nlrqresults.summary(xname=xname, yname=yname))
-			
 
 def main():
 
@@ -252,7 +249,7 @@ def main():
 		data = sm.datasets.strikes.load()
 
 	if dosomethingaboutit:
-		for x, f0, Df0 in grid(data.endog, data.exog, 0.5, bandwidth, gridpoints):
+		for x, f0, Df0 in grid1d(data.endog, data.exog, 0.5, bandwidth, gridpoints):
 			print(("{:+.4f} "*3).format(x, f0, Df0))
 	else:
 		for tau in taus:
@@ -271,8 +268,6 @@ def main():
 
 	fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
 	plot.show()
-
-
 
 if __name__ == '__main__':
 	main()

@@ -41,8 +41,9 @@ def enum(*sequential, **named):
 	return type('Enum', (), enums)
 
 class Timing:
-	def __init__(self, name):
+	def __init__(self, name, trc):
 		self.name = name
+		self.trc = trc
 
 	def __enter__(self):
 		import time
@@ -51,7 +52,8 @@ class Timing:
 	def __exit__(self, type_, value, traceback):
 		import time
 		self.stop = time.time()
-		print("Time for {0}: {1:.3f} ms".format(self.name, (self.stop-self.start)*1000.))
+		if self.trc:
+			print("Time for {0}: {1:.3f} ms".format(self.name, (self.stop-self.start)*1000.))
 		#return True
 
 def cartesian(arrays, out=None):

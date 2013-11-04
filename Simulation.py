@@ -1,10 +1,17 @@
 from etrics.Utilities import EventHook, enum
-from numpy import mean, var, matrix, power, multiply, double, asarray, percentile 
+from numpy import repeat,mean, var, matrix, power, multiply, double, asarray, percentile 
 from scipy.stats import norm, scoreatpercentile 
 from scipy import sqrt
 from fractions import Fraction
 
 Results = enum('Original', 'Bias')
+
+class TryAgain(Exception):
+	def __init__(self, expr, msg):
+		self.expr = expr
+		self.msg = msg
+	def __str__(self):
+		return repr(self.value)
 
 class Simulation:
 	__data = []
@@ -12,11 +19,15 @@ class Simulation:
 	__estimates = []
 	__samplesize = []
 	__evaluations = {Results.Bias:{}, Results.Original:{}} 
+	__estimationpars = {}
 
-	def __init__(self):
+	def __init__(self, **estimationpars):
+		self.__estimationpars = estimationpars
+
 		self.Generating = EventHook(maxhandlers=1)
 		self.Estimating = EventHook(maxhandlers=1)
-		self.PostEstimation = EventHook()
+		self.PreEstimation = EventHook()
+		self.Warning = EventHook()
 
 		self.AddStatistics({"Average":mean, "Variance":var}, type=Results.Original)
 		self.AddStatistics({"Bias":mean}, type=Results.Bias)
@@ -26,14 +37,24 @@ class Simulation:
 		self.__parameters = pars
 		self.__parnames = names
 
-	def SetSampleSize(self, N):
-		self.__samplesize = N
+	def SetSamplingParameters(self, **kwargs):
+		self.__samplingpars = kwargs
 
 	def Simulate(self, S):
 		for i in range(S):
-			self.__data = self.Generating.Fire(self.__samplesize, self.__parameters)[0]
-			self.__estimates.append(self.Estimating.Fire(self.__data)[0])
-			self.PostEstimation.Fire(Fraction(i,S))
+			self.PreEstimation.Fire(Fraction(i,S))
+			success = False
+			while not success:
+				self.__data = self.Generating.Fire(self.__parameters, **self.__samplingpars)[0]
+				try:
+					est = self.Estimating.Fire(self.__data, **self.__estimationpars)[0]
+					self.__estimates.append(est)
+				except TryAgain as ta:
+					self.Warning.Fire(ta)
+					success = False
+				else:
+					success = True
+				
 	
 	def AddStatistics(self, delegates, type=Results.Bias):
 		for k,v in delegates.items(): 
@@ -50,26 +71,32 @@ class Simulation:
 
 # usage example
 
-def createData(N, theta):
+def createData(theta, N):
+	#N = samplingpars["N"]
 	X = matrix([repeat(1, N), norm.rvs(loc=4, scale=2, size=N), norm.rvs(loc=5, scale=1, size=N)])
 	eps = matrix(norm.rvs(loc=0, scale=1, size=N))
 	return [X.T * matrix(theta).T + eps.T, X.T]
 
 def estimateModel(data):
-	res = models.OLS(data[0], data[1]).fit()
+	import statsmodels.regression.linear_model as model
+	res = model.OLS(data[0], data[1]).fit()
 	return res.params
 
-def onPostEstimation(progress):
+def Progress(progress):
 	if progress % Fraction(1,10) == 0: 
-		print(str(progress)+"...", end="") 
+		print(str(progress)+"...") 
+
+def onWarning(ex):
+	print("warning: DGP caused estimation to fail: " + ex.msg)
 
 def main():
 	x = Simulation()
 	x.SetParameters([1,2,3], ("beta{} "*3).format(1,2,3).split())
-	x.SetSampleSize(1000)
+	x.SetSamplingParameters(N=1000)
 	x.Generating += createData
 	x.Estimating += estimateModel
-	x.PostEstimation += onPostEstimation
+	x.PreEstimation += Progress 
+	x.Warning += onWarning
 	
 	x.Simulate(100)
 
@@ -83,5 +110,5 @@ def main():
 	x.PrintTable()
 
 if __name__ == '__main__':
-	# main()
-	pass
+	main()
+	# pass
