@@ -21,9 +21,7 @@ class Simulation:
 	__evaluations = {Results.Bias:{}, Results.Original:{}} 
 	__estimationpars = {}
 
-	def __init__(self, **estimationpars):
-		self.__estimationpars = estimationpars
-
+	def __init__(self):
 		self.Generating = EventHook(maxhandlers=1)
 		self.Estimating = EventHook(maxhandlers=1)
 		self.PreEstimation = EventHook()
@@ -33,9 +31,19 @@ class Simulation:
 		self.AddStatistics({"Bias":mean}, type=Results.Bias)
 		self.AddStatistics({"RMSE": lambda x,axis: sqrt(power(mean(x, axis=axis), 2)+var(x, axis=axis))})
 	
-	def SetParameters(self, pars, names):
+	def SetIdentifiedParameters(self, pars, names):
 		self.__parameters = pars
 		self.__parnames = names
+	
+	def SetStructuralParameters(self, pars):
+		self.__structuralpars = pars
+
+	def SetParameters(self, pars, names):
+		self.SetIdentifiedParameters(pars, names)
+		self.SetStructuralParameters(pars)
+
+	def SetEstimationParameters(self, **kwargs):
+		self.__estimationpars = kwargs
 
 	def SetSamplingParameters(self, **kwargs):
 		self.__samplingpars = kwargs
@@ -45,7 +53,7 @@ class Simulation:
 			self.PreEstimation.Fire(Fraction(i,S))
 			success = False
 			while not success:
-				self.__data = self.Generating.Fire(self.__parameters, **self.__samplingpars)[0]
+				self.__data = self.Generating.Fire(self.__structuralpars, **self.__samplingpars)[0]
 				try:
 					est = self.Estimating.Fire(self.__data, **self.__estimationpars)[0]
 					self.__estimates.append(est)

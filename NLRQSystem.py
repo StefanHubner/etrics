@@ -35,6 +35,11 @@ class NLRQSystem:
 		if not self.fitted:
 			print("fitgrid first")
 		return self._globalresid
+		
+	def predict(self, x0):
+		return np.zeros(self.endog.shape[1])
+		# look for the closest real x0 we fitted
+		# interpolate
 
 	def fit(self, x0, weights):
 		M = self.endog.shape[1]
@@ -80,17 +85,21 @@ class NLRQSystem:
 		glen = len(cartesian(grid))
 		residweights = np.empty((self.exog.shape[0], glen)) 
 		resids = np.empty((self.exog.shape[0], dimy*glen)) 
-		for x0r in cartesian(grid):
+		cgrid = cartesian(grid)
+		self.results = np.empty((cgrid.shape[0], len(grididcs)+dimy+dimy*len(grididcs)))
+		for x0r in cgrid:
 			x0[grididcs] = x0r
 			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
 			dist = np.sum(np.abs(self.exog-x0)**2, axis=1)**.5
 			weights = sp.stats.distributions.norm.pdf(dist/h)
 			residweights[:,j] = weights
-			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1]), False):
+			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1]), True):
 				fct, grad = self.fit(x0 = x0, weights = weights) 
+				#print(grad)
 				#resids[:,j*dimy:(j+1)*dimy] = self.resid
 				resids[:,np.array(range(dimy))*glen+j] = self.resid
-				yield np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 0).flatten(0)]).tolist()
+				#yield np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0)]).tolist()
+				self.results[j,:] = np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0)])
 			j += 1	
 		#print(resids.shape)	
 		residweights = np.divide(residweights.T, np.sum(residweights, axis=1)).T
@@ -100,6 +109,11 @@ class NLRQSystem:
 		#print(self._globalresid.shape)
 		#print (np.sum(residweights, axis=0))
 		self.fitted = True
+	
+	def GetResults(self):
+		if not self.fitted:
+			print("fitgrid first")
+		return self.results
 
 	def gridball(self, dimensions, sizeperdim):
 		eps = 0.05
@@ -172,7 +186,7 @@ class RandomSystem:
 	def AddObserved(self, fixed, names):
 		self._names += names
 		self._exog = np.hstack([self._exog, fixed])
-		self.K += 1
+		self.K += fixed.shape[1]
 	
 	def AddUnobserved(self, fixed):
 		self._unobs = np.hstack([self._unobs, fixed])
@@ -182,7 +196,6 @@ class RandomSystem:
 		print([self._ynames[i] +": "+str(np.average(self.endog[:,i])) for i in range(self.dimY)])
 		print("Exogenous variables: ") 
 		print([self._names[i] +": "+str(np.average(self.exog[:,i])) for i in range(self.K)])
-
 
 	def Linear(self, xi, eps, theta):
 		K = len(xi) # self.K
