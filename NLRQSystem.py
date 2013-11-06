@@ -5,6 +5,7 @@ import numpy as np
 import scipy as sp
 from fractions import Fraction
 import statsmodels.api as models
+import collections
 
 class NLRQSystem:
 	def __init__(self, endog, exog, tau, componentwise):
@@ -37,10 +38,40 @@ class NLRQSystem:
 		return self._globalresid
 		
 	def predict(self, x0):
-		return np.zeros(self.endog.shape[1])
-		# look for the closest real x0 we fitted
-		# interpolate
+		#print(x0)
+		#print(self.results)
+		grididcs = [i for i in range(self.exog.shape[1]) if i not in self.fixdim]
+		#print(grididcs)
+		if not self.fitted:
+			print("fitgrid first")
+		elif False in [x0[dim] == val for dim,val in self.fixdim.items()]:
+			print("cannot estimate, one dimension was fixed at another value")
+		else:
+			tree = {}
+			self.populatetree(tree, self.results, self.endog.shape[1], len(grididcs)*self.endog.shape[1])
+			return self.interpolate(tree, np.array(x0)[grididcs])[0]
+			#return np.zeros(self.endog.shape[1])
+	
+	def populatetree(self, t, z, sizey, sizedy):
+		if z.shape[1] > sizey+sizedy:
+			for v in np.unique(z[:,0]):
+				t[v] = {}
+				self.populatetree(t[v], z[z[:,0]==v][:,1:], sizey, sizedy)
+		else:
+			t['f'] = z[:,:sizey]
+			t['df'] = z[:,-sizedy:]
 
+	def interpolate(self, node, x0):
+		if len(x0) > 0:
+			snode = np.array(sorted(node))
+			idx = snode.searchsorted(x0)
+			lx, ux = snode[idx-1][0], snode[idx][0]
+			ly = self.interpolate(node[lx], x0[1:])
+			uy = self.interpolate(node[ux], x0[1:])
+			return ly+(x0[0]-lx)*(uy-ly)
+		else:
+			return node['f']
+	
 	def fit(self, x0, weights):
 		M = self.endog.shape[1]
 		#Omega = np.matrix(cartesian([np.linspace(0+self.eps,1-self.eps,self.sizeperdim).tolist()]*M))
@@ -109,6 +140,7 @@ class NLRQSystem:
 		#print(self._globalresid.shape)
 		#print (np.sum(residweights, axis=0))
 		self.fitted = True
+		self.fixdim = fixdim
 	
 	def GetResults(self):
 		if not self.fitted:
