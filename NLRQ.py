@@ -253,7 +253,7 @@ def main():
 			print(("{:+.4f} "*3).format(x, f0, Df0))
 	else:
 		for tau in taus:
-			result[tau] = np.array(list(grid(data.endog, data.exog, tau, bandwidth, gridpoints)))
+			result[tau] = np.array(list(grid1d(data.endog, data.exog, tau, bandwidth, gridpoints)))
 
 	fig=plot.figure(1, figsize=(9,13))
 	plot.subplot(211)

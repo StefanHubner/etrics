@@ -1,5 +1,5 @@
 from etrics.Utilities import EventHook, enum
-from numpy import repeat,mean, var, matrix, power, multiply, double, asarray, percentile 
+from numpy import repeat,mean, var, std,matrix, power, multiply, double, asarray, percentile 
 from scipy.stats import norm, scoreatpercentile 
 from scipy import sqrt
 from fractions import Fraction
@@ -20,6 +20,7 @@ class Simulation:
 	__samplesize = []
 	__evaluations = {Results.Bias:{}, Results.Original:{}} 
 	__estimationpars = {}
+	__auxiliaryparameters = {};	
 
 	def __init__(self):
 		self.Generating = EventHook(maxhandlers=1)
@@ -27,7 +28,7 @@ class Simulation:
 		self.PreEstimation = EventHook()
 		self.Warning = EventHook()
 
-		self.AddStatistics({"Average":mean, "Variance":var}, type=Results.Original)
+		self.AddStatistics({"Average":mean, "Std.Dev.":std}, type=Results.Original)
 		self.AddStatistics({"Bias":mean}, type=Results.Bias)
 		self.AddStatistics({"RMSE": lambda x,axis: sqrt(power(mean(x, axis=axis), 2)+var(x, axis=axis))})
 	
@@ -44,7 +45,7 @@ class Simulation:
 
 	def SetEstimationParameters(self, **kwargs):
 		self.__estimationpars = kwargs
-
+	
 	def SetSamplingParameters(self, **kwargs):
 		self.__samplingpars = kwargs
 

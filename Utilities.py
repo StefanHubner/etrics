@@ -71,3 +71,6 @@ def cartesian(arrays, out=None):
 	for j in range(1, arrays[0].size):
 		out[j*m:(j+1)*m,1:] = out[0:m,1:]
 	return out
+	
+def vech(M):
+	return np.array(np.matrix(M)[np.tril_indices(M.shape[0])])[0]
