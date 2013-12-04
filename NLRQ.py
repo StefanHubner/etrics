@@ -24,6 +24,7 @@ class NLRQ(base.LikelihoodModel):
 
 	def __init__(self, endog, exog, **kwargs):
 		super(NLRQ, self).__init__(endog, exog, **kwargs)
+		ne.set_num_threads(8)
 		self._initialize()
 		self.PostEstimation = EventHook()
 		self.PostInnerStep = EventHook()
@@ -40,6 +41,7 @@ class NLRQ(base.LikelihoodModel):
 		self.beta = 0.97
 		self.par = None
 		self.linearinpar = False
+		self.UseQR = False
 		self.weights = np.ones(self.nobs)
 		self.gradient = np.zeros(self.nobs * self.parlen).reshape(self.nobs, self.parlen)
 
@@ -71,9 +73,13 @@ class NLRQ(base.LikelihoodModel):
 			unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predictlinear(self.par)})
 			sold, snew = snew, np.sum(self.loss(unew))
 
-			q,r = sp.linalg.qr(self.gradient, mode='economic')
-			w = ne.evaluate("zw - zwhat", local_dict = \
-				{'zw':zw, 'zwhat':np.dot(self.gradient, np.dot(np.linalg.inv(r), np.dot(q.T, zw)))})
+			if self.UseQR:
+				q,r = sp.linalg.qr(self.gradient, mode='economic')
+				wbeta = np.dot(np.linalg.inv(r), np.dot(q.T, zw))
+			else:
+				wbeta = sp.linalg.lstsq(self.gradient, zw)[0]
+			
+			w = ne.evaluate("zw - zwhat", local_dict = {'zw':zw, 'zwhat':np.dot(self.gradient, wbeta)})
 
 			w1 = np.max(w) # original: w1 = np.max(np.maximum(w, 0))
 			if w1 > self.tau:
@@ -114,20 +120,28 @@ class NLRQ(base.LikelihoodModel):
 		#return self.tau * np.maximum(residuals, 0) - (1 - self.tau) * np.minimum(residuals, 0)
 
 	def meketon(self, x, y, w, tau):
-		yw = 10e+20
+		yw = np.Infinity 
 		k = 0
 		z = None
-		while k < self.maxit and yw - np.dot(y, w) > self.epsinner:
-			d = np.minimum(tau - w, 1 - tau + w)
+		while k < self.maxit and yw - ne.evaluate("sum(y*w)", local_dict = {'y':y, 'w':w }) > self.epsinner:
+			# d = np.minimum(tau - w, 1 - tau + w)
+			d = ne.evaluate('lhs + delta*(delta < 0)', local_dict = {'lhs':ne.evaluate("tau - w"), 'delta':ne.evaluate("1-2*(tau-w)")})
 
-			wx, wy = np.multiply(x.T, d).T, np.multiply(y, d)
-			q,r = sp.linalg.qr(wx, mode='economic')
-			wbeta = np.dot(np.linalg.inv(r), np.dot(q.T, wy))
+			# wx, wy = np.multiply(x.T, d).T, np.multiply(y, d)
+			wx, wy = ne.evaluate("x * d", local_dict = {'x':x.T, 'd':d}).T, ne.evaluate("y * d", local_dict={'y':y, 'd':d})
+			if self.UseQR:
+				q,r = sp.linalg.qr(wx, mode='economic')
+				wbeta = np.dot(np.linalg.inv(r), np.dot(q.T, wy))
+			else:
+				wbeta = sp.linalg.lstsq(wx, wy)[0]
+			
 			wresid = ne.evaluate("y - yhat", local_dict = {'y':y, 'yhat':np.dot(x, wbeta)})
 			
-			yw = np.sum(self.loss(wresid))
+			# yw = np.sum(self.loss(wresid))
+			yw = ne.evaluate("sum(r)", local_dict={'r':self.loss(wresid)})
 			s = ne.evaluate("wresid * d**2") 
-			alpha = np.max(np.concatenate([[self.eps], np.maximum( np.divide(s, tau - w), np.divide(-s, 1 - tau + w))]))
+			# alpha = np.max(np.concatenate([[self.eps], np.maximum( np.divide(s, tau - w), np.divide(-s, 1 - tau + w))]))
+			alpha = max(self.eps, np.max(ne.evaluate("lhs + (rhs - lhs)*(rhs - lhs > 0)", local_dict= {'lhs':ne.evaluate("s/(tau-w)"), 'rhs':ne.evaluate("-s/(1-tau+w)")})))
 			w += self.beta/alpha * s
 			k += 1
 			self.PostInnerStep.Fire({"iteration":k, "par":wbeta, "yw":yw, "ydotw":np.dot(y,w)})

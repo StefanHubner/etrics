@@ -44,38 +44,13 @@ class NLRQSystem:
 			resid[i,:] = self.endog[i,:] - self.predict(self.exog[i,:])["f"]
 		return resid
 
-	def predict(self, x0, wavgdens = None):
-		grididcs = [i for i in range(self.exog.shape[1]) if i not in self.fixdim]
-
-		if wavgdens is not None:
-			print("Predicting Public")
-			errordim = wavgdens.k_vars
-			xdim = len(grididcs) - errordim
-			K = self.sizeperdim ** errordim
-			J = self.endog.shape[1] * (1 + len(grididcs))
-			L = self.sizeperdim ** xdim
-			weights = np.array([w for w in map(wavgdens.pdf, self.results[:,:len(grididcs)][:,-errordim:])])
-			weights /= np.sum(weights)/L
-			reducedxidcs = np.array(range(L)) * K 
-			x0s = self.results[reducedxidcs,:len(grididcs)][:,:-errordim]
-			ys = np.multiply(self.results[:,len(grididcs):], np.matrix(weights).T).reshape(L, J * K)
-			ys = np.dot(ys, np.kron(np.ones((K, 1)), np.identity(J)))
-			restmp = ys if xdim == 0 else np.hstack([x0s, ys])
-		else: 
-			restmp = self.results
-
+	def predict(self, x0):
 		if not self.fitted:
 			print("fitgrid first")
 		elif False in [x0[dim] == val for dim,val in self.fixdim.items()]:
 			print("cannot predict, at least one dimension was fixed to another value")
 		else:
-			tree = {}
-			# TODO don't popluate every time
-			self.populatetree(tree, restmp, self.endog.shape[1], len(grididcs)*self.endog.shape[1])
-			grididcs = grididcs if wavgdens is None else grididcs[:-errordim]
-			#f, df = [val[0] for val in self.interpolate(tree, np.array(x0)[grididcs])]
-			f, df = [np.asarray(val).flatten() for val in self.interpolate(tree, np.array(x0)[grididcs])]
-			#print("f(", x0, ") = ", f)
+			f, df = [np.asarray(val).flatten() for val in self.interpolate(self.resulttree, np.array(x0)[self.grididcs])]
 			return {"f":f, "df":df} 
 	
 	def populatetree(self, t, z, sizey, sizedy):
@@ -94,6 +69,7 @@ class NLRQSystem:
 			lx, ux = snode[idx-1], snode[idx]
 			ly, ldy = list(self.interpolate(node[lx], x0[1:]))
 			uy, udy = list(self.interpolate(node[ux], x0[1:]))
+
 			if self.interpolationmethod == Interpolation.Quadratic and len(snode) >= 3:
 				islower = (x0[0]-lx < ux-x0[0] and idx-2 >= 0) or (idx+1 >= len(snode)) 
 				ex = snode[idx-2] if islower else snode[idx+1]
@@ -111,7 +87,6 @@ class NLRQSystem:
 	
 	def fit(self, x0, weights):
 		M = self.endog.shape[1]
-		#Omega = np.matrix(cartesian([np.linspace(0+self.eps,1-self.eps,self.sizeperdim).tolist()]*M))
 		Omega = self.gridball(M, 5) if not self.componentwise else np.identity(M)
 		L = Omega.shape[0]
 		K = self.exog.shape[1]
@@ -121,9 +96,6 @@ class NLRQSystem:
 		for i in range(L):
 			y = np.dot(self.endog, Omega[i,:].T).reshape(self.endog.shape[0])
 			nlrqmodel = NLRQ(y, self.exog, tau=self.tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=self.parlen)
-
-			#nlrqmodel.PostOuterStep += TraceOuter;
-			#nlrqmodel.PostInnerStep += TraceInner;
 			nlrqresults = nlrqmodel.fit(x0 = x0, weights = weights) 
 			Lambda[i,:] = nlrqresults.params[0:K+1]
 			self.resid[:,i] = nlrqresults.resid.T
@@ -134,52 +106,60 @@ class NLRQSystem:
 		x = np.dot(np.linalg.inv(r), np.dot(q.T, b)) # vec(mu) with mu = [mu0, mu1]
 		mu = x.reshape(K+1, M).T
 		mu0, mu1 = mu[:,0], np.delete(mu, 0, 1)
-		#print(mu0)
-		#print(mu1)
 
 		return mu0, mu1 
 
-	def fitgrid(self, h, sizeperdim, fixdim = {}): #TODO check dim vs dimy
-		#dim = self.exog.shape[1] - len(fixdim)
+	def fitgrid(self, h, sizeperdim, fixdim = {}, toboundary = True, wavgdens = None): 
 		self.sizeperdim = sizeperdim
 		x0 = np.empty(self.exog.shape[1])
-		grididcs = [i for i in range(self.exog.shape[1]) if i not in fixdim]
+		allgrididcs = [i for i in range(self.exog.shape[1]) if i not in fixdim]
 		dimy = self.endog.shape[1]
-		xmins, xmaxs = np.min(self.exog, axis=0), np.max(self.exog, axis=0)
-		#xmins, xmaxs = xmins - np.abs(xmins)*.1, xmaxs + np.abs(xmaxs)*.1
-		#xq10s, xq90s = np.percentile(self.exog, 10, axis=0), np.percentile(self.exog, 90, axis=0)
+		if toboundary: 
+			xmins, xmaxs = np.min(self.exog, axis=0), np.max(self.exog, axis=0)
+		else:
+			xmins, xmaxs = np.percentile(self.exog, 10, axis=0), np.percentile(self.exog, 90, axis=0)
 		grid = []
 		j = 0
-		for i in grididcs:
+		for i in allgrididcs:
 			grid.append(np.linspace(xmins[i], xmaxs[i], sizeperdim))
 		glen = len(cartesian(grid))
-		residweights = np.empty((self.exog.shape[0], glen)) 
-		resids = np.empty((self.exog.shape[0], dimy*glen)) 
 		cgrid = cartesian(grid)
-		self.results = np.empty((cgrid.shape[0], len(grididcs)+dimy+dimy*len(grididcs)))
+		self.results = np.empty((cgrid.shape[0], len(allgrididcs)+dimy+dimy*len(allgrididcs)))
 		for x0r in cgrid:
-			x0[grididcs] = x0r
+			x0[allgrididcs] = x0r
 			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
 			dist = np.sum(np.abs(self.exog-x0)**2, axis=1)**.5
 			weights = sp.stats.distributions.norm.pdf(dist/h)
-			residweights[:,j] = weights
 			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1]), self.trace):
 				fct, grad = self.fit(x0 = x0, weights = weights) 
-				#print(grad)
-				#resids[:,j*dimy:(j+1)*dimy] = self.resid
-				resids[:,np.array(range(dimy))*glen+j] = self.resid
-				#yield np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0)]).tolist()
 				self.results[j,:] = np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0)])
 			j += 1	
-		#print(resids.shape)	
-		residweights = np.divide(residweights.T, np.sum(residweights, axis=1)).T
-		self._globalresid = np.dot(np.multiply(resids, np.kron(np.ones((1,dimy)), residweights)), \
-			np.kron(np.identity(dimy), np.ones((glen, 1))))
-		#self._globalresid = np.dot(resids, np.kron(np.identity(dim), residweights.T))
-		#print(self._globalresid.shape)
-		#print (np.sum(residweights, axis=0))
+
 		self.fitted = True
 		self.fixdim = fixdim
+		self.resulttree = {}
+		self.populatetree(self.resulttree, self.integrate(self.results, wavgdens, allgrididcs), \
+			self.endog.shape[1], len(allgrididcs)*self.endog.shape[1])
+		self.grididcs = allgrididcs if wavgdens is None else allgrididcs[:-wavgdens.k_vars]
+		
+	def integrate(self, res, wavgdens, pgrididcs):	
+		if wavgdens is not None:
+			errordim = wavgdens.k_vars
+			xdim = len(pgrididcs) - errordim
+			K = self.sizeperdim ** errordim
+			J = self.endog.shape[1] * (1 + len(pgrididcs))
+			L = self.sizeperdim ** xdim
+			weights = np.array([w for w in map(wavgdens.pdf, res[:,:len(pgrididcs)][:,-errordim:])])
+			weights /= np.sum(weights)/L
+			reducedxidcs = np.array(range(L)) * K 
+			x0s = res[reducedxidcs,:len(pgrididcs)][:,:-errordim]
+			ys = np.multiply(res[:,len(pgrididcs):], np.matrix(weights).T).reshape(L, J * K)
+			ys = np.dot(ys, np.kron(np.ones((K, 1)), np.identity(J)))
+			restmp = ys if xdim == 0 else np.hstack([x0s, ys])
+		else: 
+			restmp = res 
+		
+		return restmp
 	
 	def GetResults(self):
 		if not self.fitted:
@@ -214,6 +194,7 @@ class RandomSystem:
 		self._endog = np.empty((N, dimY))
 		self._unobs = None 
 		self._names = []
+		self._unobsnames = []
 		self._ynames = []
 		self.knownforms = {RandomSystem.Specification.Linear:self.Linear,\
 			RandomSystem.Specification.Quadratic:self.Quadratic}
@@ -236,6 +217,7 @@ class RandomSystem:
 			self._exog[i,:] = np.array([pdf() for pdf in dists])
 
 	def GenerateUnobserved(self, dists):
+		self._unobsnames = ["eps"+str(i+1) for i in range(len(dists))] 
 		if self._unobs is None:
 			self._unobs = np.empty((self.N, len(dists)))
 
@@ -265,7 +247,8 @@ class RandomSystem:
 		self.K += fixed.shape[1]
 	
 	# should be called after (or instead of) GenerateUnobserved
-	def AddUnobserved(self, fixed):
+	def AddUnobserved(self, fixed, names):
+		self._unobsnames += names
 		self._unobs = fixed if self._unobs is None else np.hstack([self._unobs, fixed])
 
 	def PrintDescriptive(self):
