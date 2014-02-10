@@ -6,6 +6,7 @@ import scipy as sp
 from fractions import Fraction
 import statsmodels.api as models
 import collections
+import pickle
 
 Interpolation = enum('Linear', 'Quadratic')
 
@@ -22,6 +23,14 @@ class NLRQSystem:
 		self.fitted = False
 		self.interpolationmethod = imethod 
 		self.trace = trace 
+	
+	def load(self, name):
+		with open("Estimates.{0}.bin".format(name), "rb") as f:
+			self.__dict__ = pickle.load(f)
+	
+	def save(self, name):
+		with open("Estimates.{0}.bin".format(name), "wb") as f:
+			pickle.dump(self.__dict__, f)
 	
 	@property
 	def exog(self):
@@ -41,13 +50,13 @@ class NLRQSystem:
 			print("fitgrid first")
 		resid = np.empty(self.endog.shape)
 		for i in range(resid.shape[0]):
-			resid[i,:] = self.endog[i,:] - self.predict(self.exog[i,:])["f"]
+			resid[i,:] = self.endog[i,:] - self.predict(self.exog[i,:], fix=False)["f"]
 		return resid
 
-	def predict(self, x0):
+	def predict(self, x0, fix = True):
 		if not self.fitted:
 			print("fitgrid first")
-		elif False in [x0[dim] == val for dim,val in self.fixdim.items()]:
+		elif fix and False in [x0[dim] == val for dim,val in self.fixdim.items()]:
 			print("cannot predict, at least one dimension was fixed to another value")
 		else:
 			f, df = [np.asarray(val).flatten() for val in self.interpolate(self.resulttree, np.array(x0)[self.grididcs])]
@@ -119,12 +128,11 @@ class NLRQSystem:
 		else:
 			xmins, xmaxs = np.percentile(self.exog, 10, axis=0), np.percentile(self.exog, 90, axis=0)
 		grid = []
-		j = 0
 		for i in allgrididcs:
 			grid.append(np.linspace(xmins[i], xmaxs[i], sizeperdim))
 		glen = len(cartesian(grid))
 		cgrid = cartesian(grid)
-		self.results = np.empty((cgrid.shape[0], len(allgrididcs)+dimy+dimy*len(allgrididcs)))
+		self.results = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy)
 		for x0r in cgrid:
 			x0[allgrididcs] = x0r
 			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
@@ -132,13 +140,12 @@ class NLRQSystem:
 			weights = sp.stats.distributions.norm.pdf(dist/h)
 			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1]), self.trace):
 				fct, grad = self.fit(x0 = x0, weights = weights) 
-				self.results[j,:] = np.concatenate([x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0)])
-			j += 1	
+				self.results.Add(x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0))
 
 		self.fitted = True
 		self.fixdim = fixdim
 		self.resulttree = {}
-		self.populatetree(self.resulttree, self.integrate(self.results, wavgdens, allgrididcs), \
+		self.populatetree(self.resulttree, self.integrate(self.results.Everything, wavgdens, allgrididcs), \
 			self.endog.shape[1], len(allgrididcs)*self.endog.shape[1])
 		self.grididcs = allgrididcs if wavgdens is None else allgrididcs[:-wavgdens.k_vars]
 		
@@ -161,7 +168,8 @@ class NLRQSystem:
 		
 		return restmp
 	
-	def GetResults(self):
+	@property
+	def Results(self):
 		if not self.fitted:
 			print("fitgrid first")
 		return self.results
@@ -173,6 +181,36 @@ class NLRQSystem:
 		x2y2=np.array(x2y2)
 		return np.sqrt(x2y2[np.where(np.all(x2y2>=0, axis=1))])
 				
+class NLRQResult:
+	def __init__(self, N, dimX, dimY):
+		self._resultmatrix = np.empty((N, dimX+dimY+dimX*dimY))
+		self.dimX = dimX
+		self.dimY = dimY
+		self.actindex = 0
+	
+	def Add(self, x, y, Dy):
+		self._resultmatrix[self.actindex,:] = np.concatenate([x, y, Dy])
+		self.actindex += 1
+	
+	@property
+	def X(self):
+		return self._resultmatrix[:,:self.dimX]
+
+	@property
+	def Y(self):
+		return self._resultmatrix[:,self.dimX:-(self.dimX*self.dimY)]
+
+	@property
+	def DY(self):
+		return self._resultmatrix[:,(self.dimX+self.dimY):]
+
+	def partialDY(self, idx): 
+		return self.DY[:,(self.dimX*idx):(self.dimX*(idx+1))]
+
+	@property
+	def Everything(self):
+		return self._resultmatrix
+
 class RandomSystem:
 	Specification = enum('Linear', 'Quadratic', 'Individual')
 	
@@ -183,6 +221,10 @@ class RandomSystem:
 	@property
 	def endog(self):
 		return self._endog
+
+	@property
+	def names(self):
+		return self._names
 	
 	def __init__(self, N, K, dimY, theta0):
 		self.theta0 = theta0

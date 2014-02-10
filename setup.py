@@ -16,5 +16,6 @@ setup(name='Etrics',
 		'License :: OSI Approved :: GNU General Public License (GPL)',
 		'Operating System :: OS Independent',
 		'Environment :: Console',
-		'Intended Audience :: Science/Research' ]
+		'Intended Audience :: Science/Research',
+		'Topic :: Scientific/Engineering' ]
 )
