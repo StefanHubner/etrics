@@ -20,17 +20,9 @@ class NLRQSystem:
 		self.sizeperdim = 5 
 		self.eps = 0.1
 		self.componentwise = componentwise
-		self.fitted = False
 		self.interpolationmethod = imethod 
 		self.trace = trace 
-	
-	def load(self, name):
-		with open("Estimates.{0}.bin".format(name), "rb") as f:
-			self.__dict__ = pickle.load(f)
-	
-	def save(self, name):
-		with open("Estimates.{0}.bin".format(name), "wb") as f:
-			pickle.dump(self.__dict__, f)
+		self.results = None
 	
 	@property
 	def exog(self):
@@ -46,53 +38,36 @@ class NLRQSystem:
 	
 	@property
 	def residuals(self):
-		if not self.fitted:
-			print("fitgrid first")
 		resid = np.empty(self.endog.shape)
-		for i in range(resid.shape[0]):
-			resid[i,:] = self.endog[i,:] - self.predict(self.exog[i,:], fix=False)["f"]
-		return resid
+		if self.results is not None:
+			for i in range(resid.shape[0]):
+				resid[i,:] = self.endog[i,:] - self.predict(self.exog[i,:], fix=False)["f"]
+		else:
+			print("fitgrid first")
 
+		return resid
+	
+	@property
+	def Results(self):
+		if self.results is None:
+			print("fitgrid first")
+		return self.results
+
+	def load(self, dir, name):
+		with open("{0}/Estimates.{1}.bin".format(dir, name), "rb") as f:
+			self.__dict__ = pickle.load(f)
+	
+	def save(self, dir, name):
+		with open("{0}/Estimates.{1}.bin".format(dir, name), "wb") as f:
+			pickle.dump(self.__dict__, f)
+	
 	def predict(self, x0, fix = True):
-		if not self.fitted:
+		if self.results is None:
 			print("fitgrid first")
 		elif fix and False in [x0[dim] == val for dim,val in self.fixdim.items()]:
 			print("cannot predict, at least one dimension was fixed to another value")
 		else:
-			f, df = [np.asarray(val).flatten() for val in self.interpolate(self.resulttree, np.array(x0)[self.grididcs])]
-			return {"f":f, "df":df} 
-	
-	def populatetree(self, t, z, sizey, sizedy):
-		if z.shape[1] > sizey+sizedy:
-			for v in np.unique(np.asarray(z[:,0]).flatten()):
-				t[v] = {}
-				self.populatetree(t[v], z[np.asarray(z[:,0]).flatten()==v][:,1:], sizey, sizedy)
-		else:
-			t['f'] = z[:,:sizey]
-			t['df'] = z[:,-sizedy:]
-
-	def interpolate(self, node, x0):
-		if len(x0) > 0:
-			snode = np.array(sorted(node))
-			idx = snode.searchsorted(x0[0])
-			lx, ux = snode[idx-1], snode[idx]
-			ly, ldy = list(self.interpolate(node[lx], x0[1:]))
-			uy, udy = list(self.interpolate(node[ux], x0[1:]))
-
-			if self.interpolationmethod == Interpolation.Quadratic and len(snode) >= 3:
-				islower = (x0[0]-lx < ux-x0[0] and idx-2 >= 0) or (idx+1 >= len(snode)) 
-				ex = snode[idx-2] if islower else snode[idx+1]
-				ey, edy = self.interpolate(node[ex], x0[1:])
-				for [y0, y1, y2] in [[ly, uy, ey], [ldy, udy, edy]]:
-					yield y2*(x0[0]-lx)*(x0[0]-ux)/((ex-lx)*(ex-ux))+\
-						y0*(x0[0]-ex)*(x0[0]-ux)/((lx-ex)*(lx-ux))+\
-						y1*(x0[0]-ex)*(x0[0]-lx)/((ux-ex)*(ux-lx))
-			else:	
-				for [y0, y1] in [[ly, uy], [ldy, udy]]:
-					yield y0+(x0[0]-lx)*(y1-y0)/(ux-lx)
-		else:
-			yield node['f']
-			yield node['df']
+			return self.results.predict(x0)
 	
 	def fit(self, x0, weights):
 		M = self.endog.shape[1]
@@ -132,48 +107,21 @@ class NLRQSystem:
 			grid.append(np.linspace(xmins[i], xmaxs[i], sizeperdim))
 		glen = len(cartesian(grid))
 		cgrid = cartesian(grid)
-		self.results = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy)
+		self.results = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy, self.interpolationmethod, fixdim)
 		for x0r in cgrid:
 			x0[allgrididcs] = x0r
 			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
 			dist = np.sum(np.abs(self.exog-x0)**2, axis=1)**.5
 			weights = sp.stats.distributions.norm.pdf(dist/h)
-			with Timing("nlrqsystem({0}) at {1}: grid 10^{2}".format(self.tau, x0, self.exog.shape[1]), self.trace):
+			with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, self.exog.shape[1]), self.trace):
 				fct, grad = self.fit(x0 = x0, weights = weights) 
 				self.results.Add(x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0))
 
-		self.fitted = True
 		self.fixdim = fixdim
-		self.resulttree = {}
-		self.populatetree(self.resulttree, self.integrate(self.results.Everything, wavgdens, allgrididcs), \
-			self.endog.shape[1], len(allgrididcs)*self.endog.shape[1])
-		self.grididcs = allgrididcs if wavgdens is None else allgrididcs[:-wavgdens.k_vars]
-		
-	def integrate(self, res, wavgdens, pgrididcs):	
-		if wavgdens is not None:
-			errordim = wavgdens.k_vars
-			xdim = len(pgrididcs) - errordim
-			K = self.sizeperdim ** errordim
-			J = self.endog.shape[1] * (1 + len(pgrididcs))
-			L = self.sizeperdim ** xdim
-			weights = np.array([w for w in map(wavgdens.pdf, res[:,:len(pgrididcs)][:,-errordim:])])
-			weights /= np.sum(weights)/L
-			reducedxidcs = np.array(range(L)) * K 
-			x0s = res[reducedxidcs,:len(pgrididcs)][:,:-errordim]
-			ys = np.multiply(res[:,len(pgrididcs):], np.matrix(weights).T).reshape(L, J * K)
-			ys = np.dot(ys, np.kron(np.ones((K, 1)), np.identity(J)))
-			restmp = ys if xdim == 0 else np.hstack([x0s, ys])
-		else: 
-			restmp = res 
-		
-		return restmp
+		#self.results.populatetree(self.results.integrate(wavgdens, allgrididcs, self.sizeperdim), \
+		#	self.endog.shape[1], len(allgrididcs)*self.endog.shape[1])
+		self.results.populatetree(wavgdens, allgrididcs, self.sizeperdim)
 	
-	@property
-	def Results(self):
-		if not self.fitted:
-			print("fitgrid first")
-		return self.results
-
 	def gridball(self, dimensions, sizeperdim):
 		eps = 0.05
 		x2y2=cartesian([np.linspace(0+eps,1-eps,sizeperdim)**2]*(dimensions-1)).tolist()
@@ -182,11 +130,14 @@ class NLRQSystem:
 		return np.sqrt(x2y2[np.where(np.all(x2y2>=0, axis=1))])
 				
 class NLRQResult:
-	def __init__(self, N, dimX, dimY):
+	def __init__(self, N, dimX, dimY, interpolationmethod, fixdim):
 		self._resultmatrix = np.empty((N, dimX+dimY+dimX*dimY))
 		self.dimX = dimX
 		self.dimY = dimY
 		self.actindex = 0
+		self.resulttree = {}
+		self.interpolationmethod = interpolationmethod
+		self.fixdim = fixdim
 	
 	def Add(self, x, y, Dy):
 		self._resultmatrix[self.actindex,:] = np.concatenate([x, y, Dy])
@@ -210,6 +161,84 @@ class NLRQResult:
 	@property
 	def Everything(self):
 		return self._resultmatrix
+
+	def _populatetree(self, t, z, sizey, sizedy):
+		if z.shape[1] > sizey+sizedy:
+			for v in np.unique(np.asarray(z[:,0]).flatten()):
+				t[v] = {}
+				self._populatetree(t[v], z[np.asarray(z[:,0]).flatten()==v][:,1:], sizey, sizedy)
+		else:
+			t['f'] = z[:,:sizey]
+			t['df'] = z[:,-sizedy:]
+
+	def populatetree(self, wavgdens, allgrididcs, sizeperdim):		
+		#self.results.populatetree(self.results.integrate(wavgdens, allgrididcs, self.sizeperdim), \
+		#	self.endog.shape[1], len(allgrididcs)*self.endog.shape[1])
+		self.integrate(wavgdens, allgrididcs, sizeperdim)
+		self._populatetree(self.resulttree, self.Everything, self.dimY, self.dimX*self.dimY) 
+		self.grididcs = allgrididcs if wavgdens is None else allgrididcs[:-wavgdens.k_vars]
+
+	def integrate(self, wavgdens, pgrididcs, sizeperdim):	
+		if wavgdens is not None:
+			errordim = wavgdens.k_vars
+			xdim = len(pgrididcs) - errordim
+			K = sizeperdim ** errordim
+			J = self.dimY * (1 + len(pgrididcs))
+			L = sizeperdim ** xdim
+			weights = np.array([w for w in map(wavgdens.pdf, self.Everything[:,:len(pgrididcs)][:,-errordim:])])
+			weights /= np.sum(weights)/L
+			reducedxidcs = np.array(range(L)) * K 
+			x0s = self.Everything[reducedxidcs,:len(pgrididcs)][:,:-errordim]
+			ys = np.multiply(self.Everything[:,len(pgrididcs):], np.matrix(weights).T).reshape(L, J * K)
+			ys = np.dot(ys, np.kron(np.ones((K, 1)), np.identity(J)))
+			restmp = ys if xdim == 0 else np.hstack([x0s, ys])
+			print("reduced the last {0} dimensions".format(errordim))
+			print(self.Everything[0:10,:])
+			print(restmp[0:10,:])
+		else: 
+			restmp = self.Everything 
+
+		self._resultmatrix = restmp
+	
+	def interpolate(self, node, x0):
+		if len(x0) > 0:
+			snode = np.array(sorted(node))
+			idx = snode.searchsorted(x0[0])
+			lx, ux = snode[idx-1], snode[idx]
+			ly, ldy = list(self.interpolate(node[lx], x0[1:]))
+			uy, udy = list(self.interpolate(node[ux], x0[1:]))
+
+			if self.interpolationmethod == Interpolation.Quadratic and len(snode) >= 3:
+				islower = (x0[0]-lx < ux-x0[0] and idx-2 >= 0) or (idx+1 >= len(snode)) 
+				ex = snode[idx-2] if islower else snode[idx+1]
+				ey, edy = self.interpolate(node[ex], x0[1:])
+				for [y0, y1, y2] in [[ly, uy, ey], [ldy, udy, edy]]:
+					yield y2*(x0[0]-lx)*(x0[0]-ux)/((ex-lx)*(ex-ux))+\
+						y0*(x0[0]-ex)*(x0[0]-ux)/((lx-ex)*(lx-ux))+\
+						y1*(x0[0]-ex)*(x0[0]-lx)/((ux-ex)*(ux-lx))
+			else:	
+				for [y0, y1] in [[ly, uy], [ldy, udy]]:
+					yield y0+(x0[0]-lx)*(y1-y0)/(ux-lx)
+		else:
+			yield node['f']
+			yield node['df']
+	
+	def predict(self, x0):	
+		if len(x0) < len(self.fixdim) + len(self.grididcs):
+			fullx0 = np.zeros(len(self.fixdim) + len(self.grididcs))
+			fullx0[list(self.fixdim.keys())] = list(self.fixdim.values())
+			fullx0[self.grididcs] = x0
+		else:
+			fullx0 = x0
+
+		f, df = [np.asarray(val).flatten() for val in self.interpolate(self.resulttree, np.array(fullx0)[self.grididcs])]
+		return {"f":f, "df":df} 
+
+	def predictF(self, x0):
+		return self.predict(x0)["f"]	
+
+	def predictDF(self, x0):
+		return self.predict(x0)["df"]	
 
 class RandomSystem:
 	Specification = enum('Linear', 'Quadratic', 'Individual')
