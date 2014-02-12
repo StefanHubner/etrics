@@ -113,7 +113,7 @@ class NLRQSystem:
 			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
 			dist = np.sum(np.abs(self.exog-x0)**2, axis=1)**.5
 			weights = sp.stats.distributions.norm.pdf(dist/h)
-			with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, self.exog.shape[1]), self.trace):
+			with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, len(allgrididcs)), self.trace):
 				fct, grad = self.fit(x0 = x0, weights = weights) 
 				self.results.Add(x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0))
 
@@ -193,8 +193,6 @@ class NLRQResult:
 			ys = np.dot(ys, np.kron(np.ones((K, 1)), np.identity(J)))
 			restmp = ys if xdim == 0 else np.hstack([x0s, ys])
 			print("reduced the last {0} dimensions".format(errordim))
-			print(self.Everything[0:10,:])
-			print(restmp[0:10,:])
 		else: 
 			restmp = self.Everything 
 
@@ -324,7 +322,8 @@ class RandomSystem:
 
 	def PrintDescriptive(self):
 		print("Endogenous variables: ") 
-		print([self._ynames[i] +": "+str(np.average(self.endog[:,i])) for i in range(self.dimY)])
+		for f in [np.average, np.min, np.max]:
+			print([self._ynames[i] +": "+str(f(self.endog[:,i])) for i in range(self.dimY)])
 		print("Exogenous variables: ") 
 		print([self._names[i] +": "+str(np.average(self.exog[:,i])) for i in range(self.K)])
 
