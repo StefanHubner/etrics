@@ -13,7 +13,6 @@ from statsmodels.tools.tools import rank
 
 from matplotlib import rc, cm
 from numpy import arange, cos, pi
-import pylab as plot
 
 class NLRQ(base.LikelihoodModel):
 	"""
@@ -60,7 +59,7 @@ class NLRQ(base.LikelihoodModel):
 		unew = ne.evaluate("y - yhat", local_dict = {'y': self.wendog, 'yhat':self.predictlinear(self.par)})
 		snew = np.sum(self.loss(unew))
 
-		sold, lam, outer, inner, k = 10e+20, np.array(1.), 0, 0, 0
+		sold, lam, outer, inner, k = 10e+40, np.array(1.), 0, 0, 0
 
 		while outer <= self.maxit and sold - snew > self.eps:
 			if outer == 0 or not self.linearinpar:
@@ -207,14 +206,23 @@ class NLRQResultsWrapper(lm.RegressionResultsWrapper):
 
 wrap.populate_wrapper(NLRQResultsWrapper, NLRQResults)	
 
-def LocalPolynomial2(x, x0, par):
+def Polynomial1(x, x0, par):
+	K = x.shape[1]-1
+	mu0 = par[0]
+	mu1 = par[1:K+1].reshape(K, 1)
+	return (mu0 + np.dot(x-x0, mu1)).reshape(x.shape[0])
+
+def DPolynomial1(x, x0, par):
+	return np.concatenate([np.ones((x.shape[0], 1)), x-x0], axis=1), True	
+
+def Polynomial2(x, x0, par):
 	K = int(1/2+np.sqrt(x.shape[1]-3/4))
 	mu0 = par[0]
 	mu1 = par[1:K+1].reshape(K, 1)
 	mu2 = par[K+1:].reshape(K, K)
 	return (mu0 + np.dot(x-x0, mu1) + np.sum(np.multiply(np.dot(x-x0, mu2), x-x0), axis=1).reshape(x.shape)).reshape(x.shape[0])
 
-def DLocalPolynomial2(x, x0, par):
+def DPolynomial2(x, x0, par):
 	XkronX = np.multiply(np.kron(x-x0, np.ones(x.shape[1]).reshape(1,x.shape[1])), \
 		np.kron(np.ones(x.shape[1]).reshape(1,x.shape[1]), x-x0))
 	return np.concatenate([np.ones(x.shape[0]).reshape(x.shape[0], 1),x-x0,XkronX], axis=1), True	
@@ -228,8 +236,9 @@ def TraceInner(info):
 		.format(info["iteration"], info["yw"], info["ydotw"], info["par"]))
 
 def grid1d(y, x, tau, h, size):
-	parlen = x.shape[1] * (x.shape[1] + 1) + 1
-	nlrqmodel = NLRQ(y, x, tau=tau, f=LocalPolynomial2, Df=DLocalPolynomial2, parlen=parlen)
+	parlen1 = x.shape[1] + 1
+	parlen2 = x.shape[1] * (x.shape[1] + 1) + 1
+	nlrqmodel = NLRQ(y, x, tau=tau, f=Polynomial1, Df=DPolynomial1, parlen=parlen1)
 	#nlrqmodel.PostOuterStep += TraceOuter;
 	#nlrqmodel.PostInnerStep += TraceInner;
 
@@ -245,6 +254,7 @@ def grid1d(y, x, tau, h, size):
 	#print(nlrqresults.summary(xname=xname, yname=yname))
 
 def main():
+	import pylab as plot
 
 	result = {} 
 	dosimulation = True 

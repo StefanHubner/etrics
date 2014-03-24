@@ -5,7 +5,7 @@ from scipy import sqrt
 from fractions import Fraction
 from collections import OrderedDict
 
-import time, sys, types
+import time, sys, types, pickle
 
 Results = enum('Original', 'Bias')
 
@@ -29,13 +29,17 @@ class Simulation:
 		self.Generating = EventHook(maxhandlers=1)
 		self.Estimating = EventHook(maxhandlers=1)
 		self.PreEstimation = EventHook()
+		self.PostGeneration = EventHook()
 		self.PostEstimation = EventHook()
 		self.Warning = EventHook()
 
-		quantile = lambda x, t, axis: [percentile(x, t*100, axis=axis)]
-		self.AddStatistics(OrderedDict([("Mean", mean), ("Median", lambda x,a: quantile(x, .5, a)), ("Std.Dev.", std)]), type=Results.Original)
-		self.AddStatistics(OrderedDict([("Mean Bias", mean), ("Median Bias", lambda x,a: quantile(x, .5, a))]), type=Results.Bias)
-		self.AddStatistics({"RMSE": lambda x,axis: sqrt(power(mean(x, axis=axis), 2)+var(x, axis=axis))}, type=Results.Bias)
+		quantile = lambda x, t: percentile(x, t*100, axis=0)
+		self.AddStatistics({"Mean": lambda x: mean(x, axis=0)}, type=Results.Original)
+		self.AddStatistics({"Median": lambda x: quantile(x, .5)}, type=Results.Original)
+		self.AddStatistics({"Std.Dev.": lambda x: std(x, axis=0)}, type=Results.Original)
+		self.AddStatistics({"Mean Bias": lambda x: mean(x, axis=0)})
+		self.AddStatistics({"Median Bias": lambda x: quantile(x, .5)})
+		self.AddStatistics({"RMSE": lambda x: sqrt(power(mean(x, axis=0), 2)+var(x, axis=0))})
 	
 	def SetSeed(self, seed):
 		import numpy.random
@@ -66,14 +70,20 @@ class Simulation:
 			starttime = time.time()
 			success = False
 			while not success:
-				self.__data = self.Generating.Fire(self.__strpars, self.__form, **self.__smplpars)[0]
 				try:
+					self.__data = self.Generating.Fire(self.__strpars, self.__form, **self.__smplpars)[0]
+					self.PostGeneration.Fire(time.time()-starttime)		
 					est = self.Estimating.Fire(self.__data, **self.__estpars)[0]
 				except TryAgain as ta:
 					self.Warning.Fire(ta)
 					success = False
 				except KeyboardInterrupt:
-					return	
+					option = input("Simulation was interrupted: e[x]it, [p]rint, [c]ontinue? ")
+					if option == 'x':
+						return	
+					elif option == 'p':
+						self.PrintTable()
+					print("Moving on...")	
 				else:
 					self.__estimates.append(est)
 					success = True
@@ -81,15 +91,24 @@ class Simulation:
 
 			self.PostEstimation.Fire(time.time()-starttime)		
 	
+	def Load(self, dir, name):
+		with open("{0}/Simulation.{1}.bin".format(dir, name), "rb") as f:
+			self.__dict__ = pickle.load(f)
+	
+	def Save(self, dir, name):
+		with open("{0}/Simulation.{1}.bin".format(dir, name), "wb") as f:
+			pickle.dump(self.__dict__, f)
+	
 	def AddStatistics(self, delegates, type=Results.Bias):
 		for k,v in delegates.items(): 
 			(self.__evaluations[type])[k] = v
 
 	def GetResults(self, type):
-		return [ (title, (asarray(fct(matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) \
-			for coef in self.__estimates]), 0)).tolist())[0]) for title,fct in self.__evaluations[type].items()] 
+		#print(self.__parameters, self.__estimates)
+		return [ (title, asarray(fct(matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) \
+			for coef in self.__estimates]))).flatten().tolist()) for title,fct in self.__evaluations[type].items()] 
 	
-	def PrintTable(self, cols = 20):
+	def PrintTable(self, cols = 5):
 		self.WriteTable(sys.stdout, cols)
 
 	def WriteLine(self, ident, line, always = False):
@@ -184,8 +203,7 @@ def main():
 	
 	x.Simulate(100)
 
-	x.AddStatistics({"95th Quantile": \
-		lambda x,axis: [scoreatpercentile(x, 95, axis=axis)]}, type=Results.Original)
+	x.AddStatistics({"95th Quantile": lambda x: [scoreatpercentile(x, 95, axis=0)]}, type=Results.Original)
 
 	res1 = x.GetResults(Results.Original)
 	res2 = x.GetResults(Results.Bias)
