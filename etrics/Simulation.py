@@ -5,7 +5,7 @@ from scipy import sqrt
 from fractions import Fraction
 from collections import OrderedDict
 
-import time, sys, types, pickle
+import time, sys, types, pickle, logging
 
 Results = enum('Original', 'Bias')
 
@@ -25,13 +25,17 @@ class Simulation:
 	__estpars = {}
 	__auxiliaryparameters = {};	
 
-	def __init__(self):
+	def __init__(self, logger = None):
 		self.Generating = EventHook(maxhandlers=1)
 		self.Estimating = EventHook(maxhandlers=1)
 		self.PreEstimation = EventHook()
 		self.PostGeneration = EventHook()
 		self.PostEstimation = EventHook()
 		self.Warning = EventHook()
+		if logger is None:
+			self.logger = logging.getLogger("simulation")
+		else:
+			self.logger = logger
 
 		quantile = lambda x, t: percentile(x, t*100, axis=0)
 		self.AddStatistics({"Mean": lambda x: mean(x, axis=0)}, type=Results.Original)
@@ -77,12 +81,14 @@ class Simulation:
 				except TryAgain as ta:
 					self.Warning.Fire(ta)
 					success = False
-				except KeyboardInterrupt:
-					option = input("Simulation was interrupted: e[x]it, [p]rint, [c]ontinue? ")
+				except KeyboardInterrupt as ki:
+					option = input("Simulation was interrupted: e[x]it, [p]rint, [t]hrow, [c]ontinue? ")
 					if option == 'x':
 						return	
 					elif option == 'p':
 						self.PrintTable()
+					elif option == 't':
+						raise(ki)
 					print("Moving on...")	
 				else:
 					self.__estimates.append(est)
@@ -104,7 +110,6 @@ class Simulation:
 			(self.__evaluations[type])[k] = v
 
 	def GetResults(self, type):
-		#print(self.__parameters, self.__estimates)
 		return [ (title, asarray(fct(matrix([coef -multiply(self.__parameters, double(type==Results.Bias)) \
 			for coef in self.__estimates]))).flatten().tolist()) for title,fct in self.__evaluations[type].items()] 
 	
@@ -120,7 +125,7 @@ class Simulation:
 		self.__tablefilehandle = filehandle
 
 		if standalone: 
-			self.WriteLine(0, "\\documentclass{article}\n\\usepackage{booktabs}\n\\usepackage{listings}\\lstset{basicstyle=\\footnotesize}\n")
+			self.WriteLine(0, "\\documentclass{article}\n\\usepackage{booktabs}\n\\usepackage{listings}\\lstset{basicstyle=\\scriptsize}\n")
 			self.WriteLine(0, "\\usepackage[top=1cm,bottom=1cm,left=1cm,right=1cm]{geometry}\n\\usepackage{amssymb}\n\\begin{document}\n")
 
 		self.WriteLine(0, "\\begin{table}[h!]")
@@ -142,11 +147,11 @@ class Simulation:
 		self.WriteLine(0, "\\end{table}")
 			
 		if standalone:
-			self.WriteLine(0, "\\begin{lstlisting}")
+			self.WriteLine(0, "\\pagebreak\n\\begin{lstlisting}")
 
 		for k,v in [("Fct.Form",self.__form),("B",self.__actcnt)]+list(self.__smplpars.items())+list(self.__estpars.items())+list(self.__strpars.items()):
 			if not (isinstance(v, types.FunctionType) or (isinstance(v, list) and isinstance(v[0], types.FunctionType))):
-				self.WriteLine(0, "{2:} {0: <20} = {1: <50}".format(k, v, "%" if not standalone else ""))
+				self.WriteLine(0, "{2!s:} {0!s: <20} = {1!s: <50}".format(k, v, "%" if not standalone else ""))
 
 		if standalone: 
 			self.WriteLine(0, "\\end{lstlisting}")	
@@ -191,6 +196,7 @@ def Progress(progress):
 
 def onWarning(ex):
 	print("warning: DGP caused estimation to fail: " + ex.msg)
+	self.logger.warning("DGP caused estimation to fail: " + ex.msg)
 
 def main():
 	x = Simulation()

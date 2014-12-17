@@ -53,7 +53,7 @@ class RQ(base.LikelihoodModel):
 		iteration = 0
 		while self.b.shape[0]/self.t > self.eps and iteration < self.maxit:
 			r = minimize(self.lpip, a, method='Newton-CG', jac=self.grad_lpip, hess=self.hess_lpip,
-				options={'gtol': 1e-6, 'disp': True})
+				options={'disp': True})
 			a = r.x	
 			self.t = self.update**iteration 
 			iteration += 1

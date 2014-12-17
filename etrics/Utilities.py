@@ -1,4 +1,7 @@
 import numpy as np 
+import logging
+import pickle
+import sys
 from scipy.stats.distributions import triang
 
 class MaxHandlerException(Exception):
@@ -46,19 +49,32 @@ def enum(*sequential, **named):
 	return type('Enum', (), enums)
 
 class Timing:
-	def __init__(self, name, trc):
+	def __init__(self, name, trc = True, logger = None):
 		self.name = name
 		self.trc = trc
+		self.logger = logger
 
 	def __enter__(self):
 		import time
 		self.start = time.time()
+		if self.trc:
+			s = "{0}: ".format(self.name)
+			if self.logger is None:
+				print (s, end = "")
+			else:
+				self.logger.info(s)
+
+			sys.stdout.flush()
 
 	def __exit__(self, type_, value, traceback):
 		import time, datetime
 		self.stop = time.time()
 		if self.trc:
-			print("{0}: {1}".format(self.name, str(datetime.timedelta(seconds=self.stop-self.start))))
+			s = "{0}".format(str(datetime.timedelta(seconds=self.stop-self.start)))
+			if self.logger is None:
+				print (s)
+			else:
+				self.logger.info(s)	
 
 def cartesian(arrays, out=None):
 	arrays = [np.asarray(x) for x in arrays]
@@ -95,12 +111,12 @@ class multivnormal:
 
 	def ppf(self, tau):	
 		from scipy.stats.distributions import norm
-		return [norm(self._mean[i], self._variance[i][i]).ppf(tau) for i in range(len(self._mean))]
+		return [norm(self._mean[i], np.sqrt(self._variance[i][i])).ppf(tau) for i in range(len(self._mean))]
 
 	@property
 	def marginals(self):	
 		from scipy.stats.distributions import norm
-		return [norm(self._mean[i], self._variance[i][i]) for i in range(len(self._mean))]
+		return [norm(self._mean[i], np.sqrt(self._variance[i][i])) for i in range(len(self._mean))]
 	
 class ConditionalDistributionWrapper:
 	def __init__(self, basemarginals, inv, dinv):
@@ -139,13 +155,68 @@ class ConditionalDistributionWrapper:
 		return np.array([f.pdf(e) for f,e in zip(self.basemarginals, self.inv(y, x0))])
 
 class TriangularKernel:
-	def __init__(self, scale):
+	def __init__(self, scale, prepmoments=2):
 		self.c = 0.5
 		self.loc = -scale/2 
 		self.scale = scale
+		fname = ".triangular_{0}".format(int(scale*100))
+		import os.path
+		if not os.path.isfile(fname): # only the first time, then save moments
+			self.definesymbolic(scale)
+			self.preparemoments(prepmoments) 
+			with open(fname, "wb") as f: pickle.dump(self.__dict__, f)
+		else:	
+			with open(fname, "rb") as f: self.__dict__ = pickle.load(f)
+
+	@property
+	def support(self):
+		return (self.loc, self.loc + self.scale)
+
+	def definesymbolic(self, scale):	
+		from sympy import symbols, integrate, diff
+		u, n, c = symbols("u n c")
+		Kl = 2/scale + 4*u/scale**2
+		Kr = 2/scale - 4*u/scale**2
+		self._N  = integrate(Kl*u**n, (u, -scale/2, 0)) 
+		self._N += integrate(Kr*u**n, (u, 0, +scale/2))
+		self._T  = integrate(Kl**2*u**n, (u, -scale/2, 0)) 
+		self._T += integrate(Kr**2*u**n, (u, 0, +scale/2))
+		self._Q1  = integrate(diff(Kl,u)**2*u**n, (u, -scale/2, 0)) 
+		self._Q1 += integrate(diff(Kr,u)**2*u**n, (u, 0, +scale/2))
+		self._Q2 = c * integrate(Kl*u**(n-2), (u, -scale/2, 0)) 
+		self._Q2 += c * integrate(Kr*u**(n-2), (u, 0, +scale/2))
+
+	def preparemoments(self, nmom):
+		from etrics.Utilities import matrixbyelem
+		from sympy import Symbol
+		I, J = np.meshgrid(range(nmom), range(nmom))
+		self._Np = matrixbyelem(I, J, lambda i, j: self._N.subs(Symbol('n'), i+j).evalf())
+		self._Npinv = np.linalg.inv(self._Np)
+		self._Tp = matrixbyelem(I, J, lambda i, j: self._T.subs(Symbol('n'), i+j).evalf())
+		self._Qp = matrixbyelem(I, J, lambda i, j: self._Q1.subs(Symbol('n'), i+j).evalf() - \
+			(self._Q2.subs(Symbol('c'), 0.5*i*(i-1) + 0.5*j*(j-1)).subs(Symbol('n'), i+j).evalf() \
+			if np.any(np.array([i,j])) > 1 else 0))
+		self.momentsavailable = nmom	
+	
+	@property
+	def Np(self):
+		# use parameter, call preparemoments if not enought moments available
+		return self._Np
+	
+	@property
+	def Npinv(self):
+		return self._Npinv
 		
+	@property
+	def Tp(self):
+		return self._Tp
+
+	@property
+	def Qp(self):
+		return self._Qp
+
 	def pdf(self, y):
-		return triang.pdf(y, self.c, loc = self.loc, scale = self.scale)
+		return np.apply_along_axis(np.prod, 1, np.array(list(map(lambda yi: triang.pdf(yi, self.c, loc = self.loc, scale = self.scale), y))))
 
 	def moment(self, n):
 		return triang.moment(n, self.c, loc = self.loc, scale = self.scale)
@@ -155,6 +226,38 @@ class TriangularKernel:
 	
 	def momentprime2(self, n):
 		return (np.array([16 , 4, 4/3]) * (self.scale ** np.array([-3,-2,-1])))[n] 
+
+class TriangularKernel2:
+	def SetSigmas(self, sigmas):
+		self.c = 0.5
+		self.sigmas = sigmas
+		self.scales = 2 * np.sqrt(6) * sigmas 
+		self.locs = -self.scales/2 
+		#self.marginals = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs, self.scales)]
+	
+	def pdf(self, y):
+		# pickler problem with triang_gen
+		marginals = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs, self.scales)]
+		return np.apply_along_axis(lambda yi: np.product([m.pdf(yij) for m,yij in zip(marginals, yi)]), 1, y)
+	
+	def pdfnorm(self, y):
+		# pickler problem with triang_gen
+		marginals = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs/self.sigmas, self.scales/self.sigmas)] # have var's normalized to 1 (confirmed)
+		return np.apply_along_axis(lambda yi: np.product([m.pdf(yij) for m,yij in zip(marginals, yi/self.sigmas)]), 1, y)
+
+	@property
+	def B1(self):
+		Npinv = np.linalg.inv(np.diag([1] + (self.sigmas**2).tolist() ))
+		#Tp = np.diag([1] + ((self.scales/2)**2/6).tolist())
+		# u,b = symbols("u b")
+		# Kp = 1/b - 1/(b**2) * u
+		# Kn = 1/b + 1/(b**2) * u
+		# integrate(Kn**2 * u**2, (u,-b,0)) + integrate(Kp**2 * u**2, (u,0,b)) # b/15
+		# integrate(Kn**2, (u,-b,0)) + integrate(Kp**2, (u,0,b)) # 2/(3*b)
+		b = self.scales/2
+		Tp = np.diag([np.product(2/(3*b))] + (b/15).tolist())
+
+		return np.dot(np.dot(Npinv, Tp), Npinv)
 
 def quickdensityplot( data):	
 	import pylab as plt
@@ -201,3 +304,13 @@ class EstimatedDistWrapper:
 	def pdf(self, x):
 		return self.e.evaluate(x).item()
 
+class EmpiricalDistribution:		
+	def __init__(self, data):
+		self.data = data
+
+	def cdf(self, est):
+		raise NotImplementedError()
+	
+	def sample(self, N):
+		idcs = list(map(int, np.floor(np.random.uniform(size=N)*self.data.shape[0])))
+		return self.data[idcs,:]

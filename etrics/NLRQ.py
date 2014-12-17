@@ -13,6 +13,7 @@ from statsmodels.tools.tools import rank
 
 from matplotlib import rc, cm
 from numpy import arange, cos, pi
+import logging
 
 class NLRQ(base.LikelihoodModel):
 	"""
@@ -25,6 +26,8 @@ class NLRQ(base.LikelihoodModel):
 		super(NLRQ, self).__init__(endog, exog, **kwargs)
 		ne.set_num_threads(8)
 		self._initialize()
+		self.PreEstimation = EventHook()
+		self.PostVarianceCalculation = EventHook()
 		self.PostEstimation = EventHook()
 		self.PostInnerStep = EventHook()
 		self.PostOuterStep = EventHook()
@@ -41,17 +44,38 @@ class NLRQ(base.LikelihoodModel):
 		self.par = None
 		self.linearinpar = False
 		self.UseQR = False
+		self.normalizeddensityestimation = False 
 		self.weights = np.ones(self.nobs)
 		self.gradient = np.zeros(self.nobs * self.parlen).reshape(self.nobs, self.parlen)
+		if self.normalizeddensityestimation:
+			self.estimatedensitiesnormalized()
+		else:	
+			self.estimatedensities()
 
 	def setcontrol(self, maxit, eps):
 		self.maxit = maxit
 		self.eps = eps
 	
+	def estimatedensitiesnormalized(self):		
+		# normalization: must also be normalized at calling pdf (varcov calculation), not x0 for conditional
+		self.exogL, self.endogL = np.linalg.cholesky(np.matrix(np.cov(self.exog.T))), np.linalg.cholesky(np.matrix(np.cov(self.endog.T)))
+		exogZ = np.dot(np.matrix(self.exog) - np.mean(self.exog, axis=0), np.linalg.inv(self.exogL))
+		endogZ = np.dot(np.matrix(self.endog).T - np.mean(self.endog, axis=0), np.linalg.inv(self.endogL))
+		self._exogdens = sm.nonparametric.KDEMultivariate(data=exogZ, var_type=self.exogtype, bw='normal_reference')
+		self._endogdens = sm.nonparametric.KDEMultivariateConditional(endogZ, self.exog, self.endogtype, self.exogtype, bw='normal_reference')
+	
+	def estimatedensities(self):		
+		self._exogdens = sm.nonparametric.KDEMultivariate(data=self.exog, var_type=self.exogtype, bw='normal_reference')
+		self._endogdens = sm.nonparametric.KDEMultivariateConditional(self.endog, self.exog, self.endogtype, self.exogtype, bw='normal_reference')
+	
 	def fit(self, **kwargs):
-
-		self.x0 = kwargs["x0"] # have to fit dimensions TODO check
-		self.weights = kwargs["weights"].reshape(self.nobs) # have to fit dimensions TODO check
+		self.x0 = kwargs["x0"] 
+		self.dist = kwargs["dist"] 
+		self.kernel = kwargs["kernel"] 
+		self.bw = kwargs["bw"] 
+		H_k = (1/self.bw)**self.exog.shape[1]
+		self.weights = H_k * self.kernel.pdfnorm(self.dist/self.bw).reshape(self.nobs) # TODO: pdf vs pdfnorm
+		self.PreEstimation.Fire({"nonzero": 100*np.mean(np.abs(self.weights) > 0)})
 		self.par = np.zeros(self.parlen) # TODO smarter starting values
 
 		w = np.zeros(self.nobs)
@@ -91,12 +115,32 @@ class NLRQ(base.LikelihoodModel):
 			outer += 1
 			self.PostOuterStep.Fire({"iteration":outer, "par":self.par, "sold":sold, "snew":snew, "stepsize":res.x, "inner":k})
 				
-		self.normalized_cov_params =  np.identity(self.parlen)
+		self.normalized_cov_params =  self.varcov
 		res = NLRQResults(self, self.par, self.normalized_cov_params)
 		res.fit_history['outer_iterations'] = outer
 		res.fit_history['avg_inner_iterations'] = inner/outer 
 
 		return NLRQResultsWrapper(res)
+	
+	@property
+	def varcov(self): 
+		H_N = self.exog.shape[0] * (self.bw) ** self.exog.shape[1]
+		# normalization: must also be normalized at density estimation, not x0 for conditional
+		if self.normalizeddensityestimation:
+			exogZ = np.dot(self.x0 - np.mean(self.exog, axis=0), np.linalg.inv(self.exogL))
+			endogZ = np.dot(self.par[0] - np.mean(self.endog, axis=0), np.linalg.inv(self.endogL))
+			fx = self._exogdens.pdf(exogZ) / np.linalg.det(self.exogL)
+			fyx = self._endogdens.pdf(np.matrix(endogZ), np.matrix(self.x0)) / np.linalg.det(self.endogL)
+		else:
+			fx = self._exogdens.pdf(self.x0) 
+			fyx = self._endogdens.pdf(np.matrix(self.par[0]), np.matrix(self.x0))
+			
+		vcov = self.tau * (1-self.tau) * self.kernel.B1 / (fyx**2 * fx * H_N)
+		Hsq = np.hstack([[1], self.kernel.sigmas**2 * self.bw ** 2]) # z = [1, pi/h] and g = [g0,h*g1] in bahadur
+		# hence divide variance by h^2 (including variance term (not caputred by kernel here))
+		vcov /= Hsq
+		self.PostVarianceCalculation.Fire({"H_N":H_N, "B1":np.diag(self.kernel.B1), "sparsity":(1/(fyx**2)) , "density": fx, "stderrs": np.sqrt(np.diagonal(vcov))})
+		return vcov
 
 	def calculategradient(self, par):
 		self.gradient, self.linearinpar = self.Df(self.exog, self.x0, self.par)
@@ -227,31 +271,47 @@ def DPolynomial2(x, x0, par):
 		np.kron(np.ones(x.shape[1]).reshape(1,x.shape[1]), x-x0))
 	return np.concatenate([np.ones(x.shape[0]).reshape(x.shape[0], 1),x-x0,XkronX], axis=1), True	
 
-def TraceOuter(info):
-	print("{0}. outer iteration: sold = {1:.3f} snew = {2:.3f} par = {3} stepsize={4:.3f} innersteps={5}"\
+def TracePreEstimation(logger, info):
+	logger.debug("Proportion of nonzero weights: {0}%".format(info["nonzero"]))
+
+def TraceVarianceCalculation(logger, info):
+	logger.debug("VarCov: H_N = {} B1 = {} f_yx^-2 = {} f_x = {} stderrs = {}".format(info["H_N"], info["B1"], info["sparsity"], info["density"], info["stderrs"]))
+
+def TraceOuter(logger, info):
+	logger.debug("{0}. outer iteration: sold = {1:.3f} snew = {2:.3f} par = {3} stepsize={4:.3f} innersteps={5}"\
 		.format(info["iteration"], info["sold"], info["snew"], info["par"], info["stepsize"], info["inner"])) 
 
-def TraceInner(info):
-	print("\t{0}. inner iteration: yw = {1:.3f} y.w = {2:.3f} dir = {3}"\
+def TraceInner(logger, info):
+	logger.debug("\t{0}. inner iteration: yw = {1:.3f} y.w = {2:.3f} dir = {3}"\
 		.format(info["iteration"], info["yw"], info["ydotw"], info["par"]))
 
 def grid1d(y, x, tau, h, size):
 	parlen1 = x.shape[1] + 1
 	parlen2 = x.shape[1] * (x.shape[1] + 1) + 1
-	nlrqmodel = NLRQ(y, x, tau=tau, f=Polynomial1, Df=DPolynomial1, parlen=parlen1)
+	from etrics.Utilities import TriangularKernel
+	from etrics.NLRQSystem import UCIConstant
+	k = TriangularKernel(scale=5.)
+	nlrqmodel = NLRQ(y, x, tau=tau, f=Polynomial1, Df=DPolynomial1, parlen=parlen1, kernel=k)
 	#nlrqmodel.PostOuterStep += TraceOuter;
 	#nlrqmodel.PostInnerStep += TraceInner;
+	fx = sm.nonparametric.KDEUnivariate(x)
+	fx.fit()
+	T0 = k.Tp[0,0]
+	fyx = sm.nonparametric.KDEMultivariateConditional(endog=y, exog=x, dep_type='c', \
+		indep_type='c', bw='normal_reference') 
 
 	for gp in np.linspace(np.min(x), np.max(x), num=size):
 		dist = np.sum(np.abs(x-gp)**2,axis=1)**.5
-		weights = sp.stats.distributions.norm.pdf(dist/h)
+		#weights = sp.stats.distributions.norm.pdf(dist/h)/h # TODO: /h
 		#with Timing("fit"):
-		nlrqresults = nlrqmodel.fit(x0 = gp, weights = weights) 
-		yield np.concatenate([[gp], nlrqresults.params]).tolist()[0:(2+x.shape[1])]
+		nlrqresults = nlrqmodel.fit(x0 = gp, kernel = sp.stats.distributions.norm, dist = dist, bw = h) 
+		fx0 = fx.evaluate(gp).item()
+		fyx0 = fyx.pdf(np.matrix(fx0), np.matrix(gp)).item()
+		stdev = UCIConstant(0.05, h, T0) * np.sqrt(tau * (1-tau) * T0 / ( fyx0**2 * fx0 * y.shape[0] * h))
+		yield np.concatenate([[gp], nlrqresults.params, [stdev]]).tolist() # [0:(2+x.shape[1])]
 
 	#xname = ("mu"+" mu".join(map(str, range(parlen)))).split()
 	#yname = ["y"]
-	#print(nlrqresults.summary(xname=xname, yname=yname))
 
 def main():
 	import pylab as plot
@@ -260,8 +320,9 @@ def main():
 	dosimulation = True 
 	dosomethingaboutit = False
 	gridpoints = 25 
-	bandwidth = 1 
+	bandwidth = .8
 	taus = [.1, .5, .9]
+	c = dict(zip(taus, ['b', 'r', 'g']))
 
 	if dosimulation:
 		N = 600
@@ -274,7 +335,7 @@ def main():
 
 	if dosomethingaboutit:
 		for x, f0, Df0 in grid1d(data.endog, data.exog, 0.5, bandwidth, gridpoints):
-			print(("{:+.4f} "*3).format(x, f0, Df0))
+			print(("{:+.4f} "*5).format(x, f0, Df0, fx0, fyx0))
 	else:
 		for tau in taus:
 			result[tau] = np.array(list(grid1d(data.endog, data.exog, tau, bandwidth, gridpoints)))
@@ -284,11 +345,13 @@ def main():
 	plot.plot(data.exog, data.endog, 'o')
 	plot.grid(True)	
 	for tau in taus:
-		plot.plot(result[tau][:,0], result[tau][:,1], '-')
+		plot.plot(result[tau][:,0], result[tau][:,1], '-', c=c[tau])
+		plot.plot(result[tau][:,0], result[tau][:,1] + result[tau][:,3], '--', c=c[tau])
+		plot.plot(result[tau][:,0], result[tau][:,1] - result[tau][:,3], '--', c=c[tau])
 	plot.subplot(212)	
 	plot.grid(True)	
 	for tau in taus:
-		plot.plot(result[tau][:,0], result[tau][:,2], '-')
+		plot.plot(result[tau][:,0], result[tau][:,2], '-', c=c[tau])
 
 	fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
 	plot.show()
