@@ -1,4 +1,4 @@
-from etrics.Utilities import EventHook
+from etrics.Utilities import EventHook, Timing
 from scipy.optimize import minimize
 from scipy import stats
 
@@ -15,30 +15,60 @@ import statsmodels.regression.linear_model as lm
 
 class quantreg(base.LikelihoodModel):
 	""" 
+	Interior Point Method: Portnoy, Koenker 1997
+	The Gaussian hare and the Laplacian Tortoise
+
 	min_x {c'x | Ax = b, 0 <= x <= u }
 	"""	
 
 	def __init__(self, endog, exog, **kwargs):
 		super(quantreg, self).__init__(endog, exog, **kwargs)
-		self._initialize()
 		self.PostEstimation = EventHook()
-
-	def _initialize(self):
+		self.PreEstimation = EventHook()
+		self.PostVarianceCalculation = EventHook()
 		self.nobs = float(self.endog.shape[0])
 		self.df_resid = np.float(self.exog.shape[0] - rank(self.exog))
 		self.df_model = np.float(rank(self.exog)-1)
-		
-		self.c = -self.endog
-		self.A = self.exog.T
-		self.b = (1-self.tau) * sum(self.exog, 0)
-		self.u = np.ones(self.nobs)
+
+	def _initialize(self):
+		informative = (self.weights != 0) if self.isnonparametric else np.repeat(True, self.nobs)
+		self.c = -self.endog1[informative]
+		self.A = self.exog1[informative,:].T
+		self.b = (1-self.tau) * sum(self.exog1, 0)
+		self.u = np.ones(self.c.shape[0])
 		self.p  = (1-self.tau) * self.u # start on boundary
 		self.beta = 0.9995 
 		self.eps = 10e-05
 		self.maxit = 50 
 		self.big = 10e+20
 	
-	def fit(self, **kwargs):
+	def fit(self, **kwargs): # kwargs x0 = x0, kernel = kernel, dist = dist, bw = bw
+		self.isnonparametric = all([k in kwargs.keys() for k in ["x0", "kernel", "dist", "bw"]])
+		if self.isnonparametric:
+			self.kernel = kwargs.get("kernel")
+			self.bw = kwargs.get("bw") 
+			self.x0 = kwargs.get("x0")
+			H_k = (1/self.bw)**self.exog.shape[1]
+			self.weights = self.kernel.pdf(kwargs.get("dist")/self.bw).reshape(self.nobs) # TODO: pdf vs pdfnorm, *H_k ?
+			self.endog1 = ne.evaluate("y * w", local_dict = {'y': self.endog, 'w': self.weights})
+			const = np.isclose(np.max(self.exog, axis=0) - np.min(self.exog, axis=0))
+			if const.any():
+				self.exog = self.exog[:,~const]
+			self.H = np.linalg.cholesky(np.matrix(np.cov(self.exog.T))) * self.bw
+			self.exog1 = np.concatenate([np.ones((self.exog.shape[0], 1)), (self.exog - self.x0)/self.bw], axis=1) * self.weights.reshape((self.nobs,1))
+			self.PreEstimation.Fire({"nonzero": 100*np.mean(np.abs(self.weights) > 0)})
+			#print(100*np.mean(np.abs(self.weights) > 0))
+		else:
+			self.endog1 = self.endog
+			if "excludeconstant" in kwargs.keys() and kwargs.get("excludeconstant"):
+				self.exog1 = self.exog 
+			else:
+				self.exog1 = np.concatenate([np.ones((self.exog.shape[0], 1)), self.exog], axis=1) 
+		
+		return self.fit_()
+
+	def fit_(self):
+		self._initialize()
 		it = 0
 		s = ne.evaluate("u - x", local_dict =  {"u":self.u, "x":self.p})
 		y = sp.linalg.lstsq(self.A.T, self.c)[0]
@@ -70,7 +100,7 @@ class quantreg(base.LikelihoodModel):
 			dz = ne.evaluate("(-z * dx) / x  - z", local_dict = {"z": z, "dx": dx, "x":self.p})
 			dw = ne.evaluate("(-w * ds) / s  - w", local_dict = {"w": w, "ds": ds, "s":s})
 
-			delta_p, delta_d = stepsize(self.nobs, self.p, dx, s, ds, z, dz, w, dw)
+			delta_p, delta_d = stepsize(self.c.shape[0], self.p, dx, s, ds, z, dz, w, dw)
 
 			if (min(delta_d, delta_p) < 1):
 				mu = ne.evaluate("xz + sw", local_dict = {"xz":np.dot(self.p, z.T), "sw":np.dot(s, w.T)}).item() 
@@ -79,7 +109,7 @@ class quantreg(base.LikelihoodModel):
 					+ \
 					np.dot(ne.evaluate("s + dp*ds", local_dict = {"dp":delta_p, "s":s, "ds":ds}), \
 						ne.evaluate("w + dd*dw", local_dict = {"dd":delta_d, "w":w, "dw":dw}))
-				mu = (g/mu)**3 * (mu/(2*self.nobs))	
+				mu = (g/mu)**3 * (mu/(2*self.c.shape[0]))	
 
 				dxdz = ne.evaluate("dx*dz", local_dict = {"dx": dx, "dz": dz})
 				dsdw = ne.evaluate("ds*dw", local_dict = {"ds": ds, "dw": dw})
@@ -96,28 +126,62 @@ class quantreg(base.LikelihoodModel):
 				dz = ne.evaluate("mu * xinv - z - xinv * z * dx - dxdz", local_dict = {"mu":mu, "xinv":xinv, "z":z, "dx":dx, "dxdz":dxdz})
 				dw = ne.evaluate("mu * sinv - w - sinv * w * ds - dsdw", local_dict = {"mu":mu, "sinv":sinv, "w":w, "ds":ds, "dsdw":dsdw})
 			
-				delta_p, delta_d = stepsize(self.nobs, self.p, dx, s, ds, z, dz, w, dw)
+				delta_p, delta_d = stepsize(self.c.shape[0], self.p, dx, s, ds, z, dz, w, dw)
 			
 			self.p = ne.evaluate("x + dp * dx", local_dict = {"x":self.p, "dp":delta_p, "dx":dx})
 			s = ne.evaluate("s + dp * ds", local_dict = {"s":s, "dp":delta_p, "ds":ds})
 			y = ne.evaluate("y + dd * dy", local_dict = {"y":y, "dd":delta_d, "dy":dy})
 			w = ne.evaluate("w + dd * dw", local_dict = {"w":w, "dd":delta_d, "dw":dw})
 			z = ne.evaluate("z + dd * dz", local_dict = {"z":z, "dd":delta_d, "dz":dz})
-			
 						
-		self.params = y.T 
-		self.normalized_cov_params =  np.identity(self.exog.shape[1])
+		if self.isnonparametric: # TODO: check why in both cases parameters are negative
+			self.params = -np.concatenate([[y[0]], y[1:].T/self.bw])
+			self.normalized_cov_params = self.calculate_vcov(self.x0) 
+			#print(self.x0, self.params, self.predict(self.params, self.x0), np.mean(self.endog))
+		else:
+			self.params = -y.T
+			self.normalized_cov_params =self.calculate_vcov() 
 
 		res = RQResults(self, self.params, normalized_cov_params=self.normalized_cov_params)
-		res.fit_history['outer_iterations'] = it 
-		res.fit_history['avg_inner_iterations'] = 0 
+		res.fit_history['tau'] = self.tau 
+		res.fit_history['iterations'] = it 
 		return RQResultsWrapper(res)
+
+	def estimatedensities(self, weighted = False):		
+		# TODO: for weighted = True include intercepts
+		exog = self.exog1 if weighted else self.exog
+		endog = self.endog1 if weighted else self.endog
+		self._exogdens = sm.nonparametric.KDEMultivariate(data=exog, var_type='c'*self.exog.shape[1], bw='normal_reference')
+		self._endogdens = sm.nonparametric.KDEMultivariateConditional(endog, exog, 'c', 'c'*self.exog.shape[1], bw='normal_reference')
+		#self._residdens = sm.nonparametric.KDEUnivariate(endog - np.dot(exog, self.params), 'c', bw='normal_reference')
+		#self._residdens.fit()
 
 	def predict(self, params, exog=None):
 		if exog is None:
-			exog = self.exog
+			exog = self.exog1[:,1:]
 		
-		return np.dot(exog, params)
+		return params[0] + np.dot(exog, params[1:])
+
+	def calculate_vcov(self, x0): # based on varcov, write new function for density based
+		exog = self.exog1
+		endog = self.endog1
+		exog = self.A.T
+		endog = -self.c
+		N = exog.shape[0]
+		H_N = N * (self.bw) ** exog.shape[1]
+		resid = endog - np.dot(exog, self.params)
+		#h = (np.percentile(resid, 75) - np.percentile(resid, 25)) * N**(-2/5)
+		h = np.std(resid) * N**(-2/5)
+		Dinv = (N*h) * np.linalg.inv(np.dot(np.multiply(sp.stats.distributions.norm.pdf(resid/h).reshape((-1,1)), exog).T, exog))
+		Omega = 1/N * np.dot(exog.T, exog)
+		vcov = 1/N * self.tau * (1 - self.tau) * Dinv * Omega * Dinv
+		self.PostVarianceCalculation.Fire({"H_N":h, "B1":None, "sparsity":None, "density": None, "stderrs": np.sqrt(np.diagonal(vcov))})
+		return vcov
+	
+	def calculate_vcov_2(self, x0):
+		#self.estimatedensities(weighted = True)
+		#self.PostVarianceCalculation.Fire({"H_N":H_N, "B1":np.diag(self.kernel.B1), "sparsity":(1/(fyx**2)) , "density": fx, "stderrs": np.sqrt(np.diagonal(vcov))})
+		pass
 
 class RQResults(base.LikelihoodModelResults):
 	fit_history = {}
@@ -130,7 +194,7 @@ class RQResults(base.LikelihoodModelResults):
 
 	@cache_readonly
 	def fittedvalues(self):
-		return np.dot(self.model.exog, self.params)
+		return np.dot(self.model.exog1, self.params)
 
 	@cache_readonly
 	def resid(self):
@@ -138,6 +202,7 @@ class RQResults(base.LikelihoodModelResults):
 
 	@cache_readonly
 	def varcov(self):
+
 		return self.cov_params(scale=1.)
 
 	@cache_readonly
@@ -155,8 +220,8 @@ class RQResults(base.LikelihoodModelResults):
 		top_right = [('No. Observations:', None), 
 			('Df Residuals:', None), 
 			('Df Model:', None),
-			('Outer Iterations:', ["%d" % self.fit_history['outer_iterations']]), 
-			('Inner Iterations:', ["%d" % self.fit_history['avg_inner_iterations']]) ]
+			('Tau:', ["%.3f" % self.fit_history['tau']]), 
+			('Iterations:', ["%d" % self.fit_history['iterations']]) ]
 
 		if not title is None:
 			title = "Quantile Regression Results"
@@ -174,14 +239,60 @@ class RQResultsWrapper(lm.RegressionResultsWrapper):
 
 wrap.populate_wrapper(RQResultsWrapper, RQResults)	
 
-def main():
-	data = sm.datasets.longley.load()
+def main_2():
+	data = sm.datasets.anes96.load()
 	data.exog = sm.add_constant(data.exog, prepend=False)
-	print(sm.OLS(data.endog, data.exog).fit().summary())
-	xname = ["x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-	yname = ["y"]
-	qrresults = quantreg(data.endog, data.exog, tau=0.5).fit() 
-	print(qrresults.summary(xname=xname, yname=yname))
+	print(sm.OLS(data.endog, data.exog).fit().summary(xname = data.exog_name, yname = data.endog_name))
+	qrresults = quantreg(data.endog, data.exog, tau=0.5).fit(excludeconstant = True) 
+	print(qrresults.summary(xname=data.exog_name, yname=data.endog_name))
+
+def main():
+	import pylab as plot
+	def grid1d(y, x, tau, h, size):
+		parlen1 = x.shape[1] + 1
+		parlen2 = x.shape[1] * (x.shape[1] + 1) + 1
+		from etrics.Utilities import TriangularKernel2
+		from etrics.NLRQSystem import UCIConstant
+		k = TriangularKernel2()
+		k.SetSigmas(np.std(x, axis=0))
+		
+		nlrqmodel = quantreg(y, x, tau=tau)
+		for gp in np.linspace(np.min(x), np.max(x), num=size):
+			dist = np.sum(np.abs(x-gp)**2,axis=1)**.5
+			nlrqresults = nlrqmodel.fit(x0 = gp, kernel = k, dist = dist, bw = h) 
+			yield np.concatenate([[gp], nlrqresults.params]).tolist() 
+
+	result = {} 
+	dosomethingaboutit = False
+	gridpoints = 25 
+	bandwidth = .2
+	taus = [.1, .5, .9]
+	c = dict(zip(taus, ['b', 'r', 'g']))
+
+	N = 600
+	class data:
+		exog = sp.stats.distributions.uniform.rvs(0, 4*sp.pi, N)
+		endog = sp.sin(exog) + sp.stats.distributions.norm.rvs(0, 0.4, N) * (exog**0.5)
+		exog = exog.reshape(N, 1)
+	
+	for tau in taus:
+		result[tau] = np.array(list(grid1d(data.endog, data.exog, tau, bandwidth, gridpoints)))
+
+	fig=plot.figure(1, figsize=(9,13))
+	plot.subplot(211)
+	plot.plot(data.exog, data.endog, 'o')
+	plot.grid(True)	
+	for tau in taus:
+		plot.plot(result[tau][:,0], result[tau][:,1], '-', c=c[tau])
+		#plot.plot(result[tau][:,0], result[tau][:,1] + result[tau][:,3], '--', c=c[tau])
+		#plot.plot(result[tau][:,0], result[tau][:,1] - result[tau][:,3], '--', c=c[tau])
+	plot.subplot(212)	
+	plot.grid(True)	
+	for tau in taus:
+		plot.plot(result[tau][:,0], result[tau][:,2], '-', c=c[tau])
+
+	fig.savefig('sin.pdf', dpi=fig.dpi, orientation='portrait', bbox_inches='tight', papertype='a4')
+	plot.show()
 
 if __name__ == '__main__':
-	main()
+	main_2()

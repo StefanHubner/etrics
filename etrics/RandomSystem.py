@@ -151,11 +151,13 @@ class RandomSystem:
 		self._unobs = fixed if self._unobs is None else np.hstack([self._unobs, fixed])
 
 	def PrintDescriptive(self, logger):
+		logger.info("Descriptives avg/min/q10/q90/max: ")
 		logger.info("Endogenous variables: ") 
 		for f in [np.average, np.min, lambda x: np.percentile(x, 10), lambda x: np.percentile(x, 90),  np.max]:
 			logger.info([self._ynames[i] +": "+str(f(self.endog[:,i])) for i in range(self.dimY)])
 		logger.info("Exogenous variables: ") 
-		logger.info([self._names[i] +": "+str(np.average(self.exog[:,i])) for i in range(self.K)])
+		for f in [np.average, np.min, lambda x: np.percentile(x, 10), lambda x: np.percentile(x, 90),  np.max]:
+			logger.info([self._names[i] +": "+str(f(self.exog[:,i])) for i in range(self.K)])
 
 	def EstimateDistributions(self):
 		self._exogdens = lambda x: sm.nonparametric.KDEMultivariate(data=self.exog1, \

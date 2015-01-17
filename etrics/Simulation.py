@@ -94,6 +94,7 @@ class Simulation:
 					self.__estimates.append(est)
 					success = True
 					self.__actcnt += 1
+					self.WriteTable()
 
 			self.PostEstimation.Fire(time.time()-starttime)		
 	
@@ -114,50 +115,56 @@ class Simulation:
 			for coef in self.__estimates]))).flatten().tolist()) for title,fct in self.__evaluations[type].items()] 
 	
 	def PrintTable(self, cols = 5):
-		self.WriteTable(sys.stdout, cols)
+		self.WriteTable("stdout", cols)
 
 	def WriteLine(self, ident, line, always = False):
 		if self.__uselatex or always:
 			self.__tablefilehandle.write("{0}{1}\n".format("\t"*ident*int(self.__uselatex), line))
 
-	def WriteTable(self, filehandle, cols = 5, standalone = False, caption = None, label = None):
-		self.__uselatex = filehandle != sys.stdout 
-		self.__tablefilehandle = filehandle
+	def SetWritingOptions(self, filename, cols = 5, standalone = False, caption = None, label = None):
+		self.__tablefilename = filename
+		self.__cols = cols
+		self.__standalone = standalone
+		self.__caption = caption
+		self.__label = label 
 
-		if standalone: 
+	def WriteTable(self):
+		self.__tablefilehandle = open(self.__tablefilename, "w") if self.__tablefilename is not "stdout" else sys.stdout
+		self.__uselatex = self.__tablefilehandle != sys.stdout 
+		if self.__standalone: 
 			self.WriteLine(0, "\\documentclass{article}\n\\usepackage{booktabs}\n\\usepackage{listings}\\lstset{basicstyle=\\scriptsize}\n")
 			self.WriteLine(0, "\\usepackage[top=1cm,bottom=1cm,left=1cm,right=1cm]{geometry}\n\\usepackage{amssymb}\n\\begin{document}\n")
 
 		self.WriteLine(0, "\\begin{table}[h!]")
 		self.WriteLine(1, "\\centering")
-		self.WriteLine(1, "\\begin{{tabular}}{{l|{0}}}".format("c"*cols))
+		self.WriteLine(1, "\\begin{{tabular}}{{l|{0}}}".format("c"*self.__cols))
 		self.WriteLine(1, "\\toprule")
 
-		self.WriteTableInt([("True Values", self.__parameters)]+self.GetResults(Results.Original)+self.GetResults(Results.Bias), self.__parnames, cols)
+		self.WriteTableInt([("True Values", self.__parameters)]+self.GetResults(Results.Original)+self.GetResults(Results.Bias), self.__parnames, self.__cols)
 
 		self.WriteLine(1, "\\bottomrule")
 		self.WriteLine(1, "\\end{tabular}")
 		
-		if caption is not None: 
-			self.WriteLine(1, "\\caption{{{0}}}".format(caption))
+		if self.__caption is not None: 
+			self.WriteLine(1, "\\caption{{{0}}}".format(self.__caption))
 		
-		if label is not None: 
-			self.WriteLine(1, "\\label{{{0}}}".format(label))
+		if self.__label is not None: 
+			self.WriteLine(1, "\\label{{{0}}}".format(self.__label))
 		
 		self.WriteLine(0, "\\end{table}")
 			
-		if standalone:
+		if self.__standalone:
 			self.WriteLine(0, "\\pagebreak\n\\begin{lstlisting}")
 
 		for k,v in [("Fct.Form",self.__form),("B",self.__actcnt)]+list(self.__smplpars.items())+list(self.__estpars.items())+list(self.__strpars.items()):
 			if not (isinstance(v, types.FunctionType) or (isinstance(v, list) and isinstance(v[0], types.FunctionType))):
-				self.WriteLine(0, "{2!s:} {0!s: <20} = {1!s: <50}".format(k, v, "%" if not standalone else ""))
+				self.WriteLine(0, "{2!s:} {0!s: <20} = {1!s: <50}".format(k, v.replace("\n", " "), "%" if not self.__standalone else ""))
 
-		if standalone: 
+		if self.__standalone: 
 			self.WriteLine(0, "\\end{lstlisting}")	
 			self.WriteLine(0, "\\end{document}\n")
 		
-		if filehandle != sys.stdout: filehandle.close()
+		if self.__uselatex: self.__tablefilehandle.close()
 
 	def WriteTableInt(self, results, names, cols):
 		hnames, tnames = names[:cols], names[cols:]
@@ -196,7 +203,6 @@ def Progress(progress):
 
 def onWarning(ex):
 	print("warning: DGP caused estimation to fail: " + ex.msg)
-	self.logger.warning("DGP caused estimation to fail: " + ex.msg)
 
 def main():
 	x = Simulation()

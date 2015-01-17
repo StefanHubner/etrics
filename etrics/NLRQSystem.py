@@ -1,4 +1,5 @@
 from etrics.NLRQ import NLRQ, Polynomial1, DPolynomial1, Polynomial2, DPolynomial2, TraceInner, TraceOuter, TracePreEstimation, TraceVarianceCalculation
+from etrics.quantreg import quantreg
 from etrics.Utilities import cartesian, Timing, enum, EventHook
 from scipy.stats import norm, scoreatpercentile
 import numpy as np
@@ -95,7 +96,7 @@ class NLRQSystem:
 		else:
 			return self.results.predict(x0, ignorenans = ignorenans)
 	
-	def fit(self, x0, kernel, dist, bw, nvectors=5):
+	def fit(self, x0, kernel, dist, bw, nvectors=5, interiorpoint=True):
 		M = self.endog.shape[1]
 		Omega = self.gridball(M, nvectors) if not self.componentwise else np.identity(M)
 		L = Omega.shape[0]
@@ -108,7 +109,11 @@ class NLRQSystem:
 			self.resid = np.zeros(self.exog.shape[0]*L).reshape(self.exog.shape[0], L)
 			for i in range(L):
 				y = np.dot(self.endog, Omega[i,:].T).reshape(self.endog.shape[0])
-				self.nlrqmodels[i] = NLRQ(y, self.exog, endogtype=self._endogtype[i], exogtype=self._exogtype, tau=self.tau, f=self.polynomial, Df=self.dpolynomial, parlen=self.parlen)
+				if interiorpoint:
+					self.nlrqmodels[i] = quantreg(y, self.exog, tau=self.tau)
+				else:
+					self.nlrqmodels[i] = NLRQ(y, self.exog, endogtype=self._endogtype[i], exogtype=self._exogtype, \
+						tau=self.tau, f=self.polynomial, Df=self.dpolynomial, parlen=self.parlen)
 				if self.trace:
 					# pickler cannot deal with lambda expression
 					def trcpre(info): TracePreEstimation(self.logger, info) 
@@ -117,6 +122,7 @@ class NLRQSystem:
 					self.nlrqmodels[i].PostVarianceCalculation += trcvar 
 
 		for i in range(L):
+			#with Timing("Fit", True):
 			nlrqresults = self.nlrqmodels[i].fit(x0 = x0, kernel = kernel, dist = dist, bw = bw) 
 			Lambda["par"][i,:] = nlrqresults.params[0:K+1]
 			Lambda["var"][i,:] = np.diagonal(nlrqresults.varcov)[0:K+1]
@@ -160,8 +166,8 @@ class NLRQSystem:
 				cgrid = np.hstack([np.kron(cartesian(grid), np.ones((M,1))), empdist.sample(M*len(cartesian(grid)))])
 			M_ = M	
 
-		self.results = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy, self.interpolationmethod, fixdim, self.logger)
-		self.variances = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy, self.interpolationmethod, fixdim, self.logger)
+		self.results = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy, self.interpolationmethod, fixdim)
+		self.variances = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy, self.interpolationmethod, fixdim)
 		j = 0
 		mu, sigma = np.mean(self.exog, axis=0), np.std(self.exog, axis=0)
 		kernel.SetSigmas(sigma)
@@ -173,7 +179,7 @@ class NLRQSystem:
 			#dist = np.abs(self.exog - x0)/sigma 
 			dist = self.exog - x0
 			#self.logger.debug("x0 = {} min(x) = {} max(x) = {}".format(np.min(self.exog, axis=0), np.max(self.exog, axis=0)))
-			with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, len(allgrididcs)), trc = self.trace, logger = self.logger):
+			with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, len(allgrididcs)), trc = self.trace, logger = self.logger): 
 				self.PreEstimation.Fire(Fraction(j, len(cgrid)))
 				fct, grad, fctse, gradse = self.fit(x0, kernel, dist, h) 
 				if(self.trace):
@@ -197,9 +203,8 @@ class NLRQSystem:
 		return np.sqrt(x2y2[np.where(np.all(x2y2>=0, axis=1))])
 				
 class NLRQResult:
-	def __init__(self, N, dimX, dimY, interpolationmethod, fixdim, logger):
+	def __init__(self, N, dimX, dimY, interpolationmethod, fixdim):
 		self._resultmatrix = np.empty((N, dimX+dimY+dimX*dimY))
-		self.logger = logger
 		self.dimX = dimX
 		self.dimY = dimY
 		self.actindex = 0
@@ -307,9 +312,16 @@ class NLRQResult:
 			fullx0 = x0
 
 		f, df = [np.asarray(val).flatten() for val in self.interpolate(self.resulttree, np.array(fullx0)[self.grididcs])]
-		if np.any(np.isnan(f)) and not ignorenans:
-			self.logger.error("Prediction failed. x0 = {}".format(fullx0))
-			raise Exception("prediction failed")
+		if np.any(np.isnan(f)) and not ignorenans: 
+			print(self.X)
+			fullmin_g = np.zeros(len(self.fixdim) + len(self.grididcs))
+			fullmin_g[list(self.fixdim.keys())] = list(self.fixdim.values())
+			fullmin_g[self.grididcs] = np.min(self.X, axis=0) 
+			fullmax_g = np.zeros(len(self.fixdim) + len(self.grididcs))
+			fullmax_g[list(self.fixdim.keys())] = list(self.fixdim.values())
+			fullmax_g[self.grididcs] = np.max(self.X, axis=0) 
+
+			raise Exception("Prediction failed [ignorenans={}] x = {} f = {} df = {} min_g = {} max_g = {}".format(ignorenans, fullx0, f, df, fullmin_g, fullmax_g))
 		return {"f":f, "df":df} 
 
 	def predictF(self, x0):

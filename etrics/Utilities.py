@@ -236,14 +236,21 @@ class TriangularKernel2:
 		#self.marginals = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs, self.scales)]
 	
 	def pdf(self, y):
-		# pickler problem with triang_gen
-		marginals = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs, self.scales)]
-		return np.apply_along_axis(lambda yi: np.product([m.pdf(yij) for m,yij in zip(marginals, yi)]), 1, y)
+		#marginals_old = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs, self.scales)]
+		marginals = [lambda x: max(2.0/s - (4.0/(s**2))*abs(x), 0.0) for s in self.scales]
+		ytmp = y if len(y.shape) == 2 else y.reshape((-1,1))
+		#with Timing("eval pdfs", True): # triang.pdf very slow (1sec for N = 1500)
+		#weights_old = np.apply_along_axis(lambda yi: np.product([m.pdf(yij) for m,yij in zip(marginals_old, yi)]), 1, ytmp)
+		weights = np.apply_along_axis(lambda yi: np.product([m(yij) for m,yij in zip(marginals, yi)]), 1, ytmp)
+		#print("Weights and old weights close? {}".format(np.all(np.isclose(weights, weights_old))))
+		#print(weights[~np.isclose(weights, weights_old)])
+		return weights
 	
 	def pdfnorm(self, y):
 		# pickler problem with triang_gen
 		marginals = [triang(self.c, loc = l, scale = s) for l,s in zip(self.locs/self.sigmas, self.scales/self.sigmas)] # have var's normalized to 1 (confirmed)
-		return np.apply_along_axis(lambda yi: np.product([m.pdf(yij) for m,yij in zip(marginals, yi/self.sigmas)]), 1, y)
+		ytmp = y if len(y.shape) == 2 else y.reshape((-1,1))
+		return np.apply_along_axis(lambda yi: np.product([m.pdf(yij) for m,yij in zip(marginals, yi/self.sigmas)]), 1, ytmp)
 
 	@property
 	def B1(self):
