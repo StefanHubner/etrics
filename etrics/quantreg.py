@@ -1,6 +1,8 @@
 from etrics.Utilities import EventHook, Timing
 from scipy.optimize import minimize
 from scipy import stats
+from scipy.linalg import sqrtm
+from numpy.linalg import LinAlgError
 
 from statsmodels.tools.decorators import (resettable_cache, cache_readonly, cache_writable)
 from statsmodels.tools.tools import rank
@@ -12,6 +14,11 @@ import statsmodels.api as sm
 import statsmodels.base.model as base
 import statsmodels.base.wrapper as wrap
 import statsmodels.regression.linear_model as lm
+
+class NoDataError(Exception):
+	def __init__(self, x0):
+		self.expr = "NoDataError"
+		self.message = "No data available for estimation around x0 = {} (increase bw or boundarydelta)".format(x0)
 
 class quantreg(base.LikelihoodModel):
 	""" 
@@ -32,6 +39,8 @@ class quantreg(base.LikelihoodModel):
 
 	def _initialize(self):
 		informative = (self.weights != 0) if self.isnonparametric else np.repeat(True, self.nobs)
+		if np.sum(informative) == 0:
+			raise NoDataError(self.x0)
 		self.c = -self.endog1[informative]
 		self.A = self.exog1[informative,:].T
 		self.b = (1-self.tau) * sum(self.exog1, 0)
@@ -43,29 +52,31 @@ class quantreg(base.LikelihoodModel):
 		self.big = 10e+20
 	
 	def fit(self, **kwargs): # kwargs x0 = x0, kernel = kernel, dist = dist, bw = bw
-		self.isnonparametric = all([k in kwargs.keys() for k in ["x0", "kernel", "dist", "bw"]])
+		self.isnonparametric = all([k in kwargs.keys() for k in ["x0", "kernel", "bw"]])
+		const = np.isclose(np.max(self.exog, axis=0), np.min(self.exog, axis=0))
+		if const.any():
+			self.exog = self.exog[:,~const]
 		if self.isnonparametric:
 			self.kernel = kwargs.get("kernel")
 			self.bw = kwargs.get("bw") 
 			self.x0 = kwargs.get("x0")
 			H_k = (1/self.bw)**self.exog.shape[1]
-			self.weights = self.kernel.pdf(kwargs.get("dist")/self.bw).reshape(self.nobs) # TODO: pdf vs pdfnorm, *H_k ?
+			self.Hinv = np.linalg.inv(sqrtm(np.matrix(np.cov(self.exog.T))) * self.bw)
+			z = np.dot(self.exog - self.x0, self.Hinv)
+			#print(self.bw, np.std(z, axis=0))
+			self.weights = self.kernel.pdf(z).reshape(self.nobs) 
+			self.exog1 = np.multiply(np.concatenate([np.ones((self.exog.shape[0], 1)), z], axis=1), self.weights.reshape((-1,1)))
 			self.endog1 = ne.evaluate("y * w", local_dict = {'y': self.endog, 'w': self.weights})
-			const = np.isclose(np.max(self.exog, axis=0) - np.min(self.exog, axis=0))
-			if const.any():
-				self.exog = self.exog[:,~const]
-			self.H = np.linalg.cholesky(np.matrix(np.cov(self.exog.T))) * self.bw
-			self.exog1 = np.concatenate([np.ones((self.exog.shape[0], 1)), (self.exog - self.x0)/self.bw], axis=1) * self.weights.reshape((self.nobs,1))
 			self.PreEstimation.Fire({"nonzero": 100*np.mean(np.abs(self.weights) > 0)})
-			#print(100*np.mean(np.abs(self.weights) > 0))
+			#print(self.x0, 100*np.mean(np.abs(self.weights) > 0))
 		else:
 			self.endog1 = self.endog
-			if "excludeconstant" in kwargs.keys() and kwargs.get("excludeconstant"):
-				self.exog1 = self.exog 
-			else:
-				self.exog1 = np.concatenate([np.ones((self.exog.shape[0], 1)), self.exog], axis=1) 
+			self.exog1 = np.concatenate([np.ones((self.exog.shape[0], 1)), self.exog], axis=1) 
 		
-		return self.fit_()
+		try:
+			return self.fit_()
+		except LinAlgError:
+			raise NoDataError(self.x0)
 
 	def fit_(self):
 		self._initialize()
@@ -135,7 +146,7 @@ class quantreg(base.LikelihoodModel):
 			z = ne.evaluate("z + dd * dz", local_dict = {"z":z, "dd":delta_d, "dz":dz})
 						
 		if self.isnonparametric: # TODO: check why in both cases parameters are negative
-			self.params = -np.concatenate([[y[0]], y[1:].T/self.bw])
+			self.params = -np.concatenate([[y[0]], np.dot(self.Hinv, y[1:].T)])
 			self.normalized_cov_params = self.calculate_vcov(self.x0) 
 			#print(self.x0, self.params, self.predict(self.params, self.x0), np.mean(self.endog))
 		else:
@@ -175,8 +186,11 @@ class quantreg(base.LikelihoodModel):
 		Dinv = (N*h) * np.linalg.inv(np.dot(np.multiply(sp.stats.distributions.norm.pdf(resid/h).reshape((-1,1)), exog).T, exog))
 		Omega = 1/N * np.dot(exog.T, exog)
 		vcov = 1/N * self.tau * (1 - self.tau) * Dinv * Omega * Dinv
-		self.PostVarianceCalculation.Fire({"H_N":h, "B1":None, "sparsity":None, "density": None, "stderrs": np.sqrt(np.diagonal(vcov))})
-		return vcov
+		var_f = vcov[0,0]
+		var_df = np.diagonal(np.dot(np.dot(self.Hinv, vcov[1:,1:]), self.Hinv))
+		vcov_final = np.diag(np.concatenate([[var_f], var_df]))
+		self.PostVarianceCalculation.Fire({"H_N":h, "B1":None, "sparsity":None, "density": None, "stderrs": np.sqrt(np.diagonal(vcov_final))})
+		return vcov_final
 	
 	def calculate_vcov_2(self, x0):
 		#self.estimatedensities(weighted = True)

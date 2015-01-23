@@ -1,10 +1,11 @@
 from etrics.NLRQ import NLRQ, Polynomial1, DPolynomial1, Polynomial2, DPolynomial2, TraceInner, TraceOuter, TracePreEstimation, TraceVarianceCalculation
-from etrics.quantreg import quantreg
+from etrics.quantreg import quantreg, NoDataError
 from etrics.Utilities import cartesian, Timing, enum, EventHook
 from scipy.stats import norm, scoreatpercentile
 import numpy as np
 import scipy as sp
 from fractions import Fraction
+from numpy.linalg import LinAlgError
 import statsmodels.api as sm
 import collections
 import pickle
@@ -13,6 +14,13 @@ from scipy.stats.distributions import norm
 
 Interpolation = enum('Linear', 'Quadratic')
 Integration = enum('Density', 'Sampling')
+
+def gridball(self, dimensions, sizeperdim):
+	eps = 0.05
+	x2y2=cartesian([np.linspace(0+eps,1-eps,sizeperdim)**2]*(dimensions-1)).tolist()
+	for i in x2y2: i.append(1-np.sum(i))
+	x2y2=np.array(x2y2)
+	return np.sqrt(x2y2[np.where(np.all(x2y2>=0, axis=1))])
 
 class NLRQSystem:
 	def __init__(self, endog, exog, endogtype, exogtype, tau, componentwise, imethod=Interpolation.Linear, trace=False, opol = 2, logger = None):
@@ -96,37 +104,50 @@ class NLRQSystem:
 		else:
 			return self.results.predict(x0, ignorenans = ignorenans)
 	
-	def fit(self, x0, kernel, dist, bw, nvectors=5, interiorpoint=True):
+	def PrepareFit(self, nvectors = 5, interiorpoint = True, parallel = True):
+		#self.resid = np.zeros(self.exog.shape[0]*L).reshape(self.exog.shape[0], L)
 		M = self.endog.shape[1]
-		Omega = self.gridball(M, nvectors) if not self.componentwise else np.identity(M)
+		Omega = gridball(M, nvectors) if not self.componentwise else np.identity(M)
+		L = Omega.shape[0]
+		for i in range(L):
+			y = np.dot(self.endog, Omega[i,:].T).reshape(self.endog.shape[0])
+			if interiorpoint:
+				self.nlrqmodels[i] = quantreg(y, self.exog, tau=self.tau)
+			else:
+				self.nlrqmodels[i] = NLRQ(y, self.exog, endogtype=self._endogtype[i], exogtype=self._exogtype, \
+					tau=self.tau, f=self.polynomial, Df=self.dpolynomial, parlen=self.parlen)
+			if self.trace and not parallel:
+				# pickler cannot deal with lambda expression
+				def trcpre(info): TracePreEstimation(self.logger, info) 
+				def trcvar(info): TraceVarianceCalculation(self.logger, info)
+				self.nlrqmodels[i].PreEstimation += trcpre
+				self.nlrqmodels[i].PostVarianceCalculation += trcvar 
+
+	def fit(self, x0, nvectors=5, ignorenodataerrors=True):
+		M = self.endog.shape[1]
+		Omega = gridball(M, nvectors) if not self.componentwise else np.identity(M)
 		L = Omega.shape[0]
 		K = self.exog.shape[1]
 		Lambda, mu0, mu1 = {}, {}, {}
 		Lambda["par"] = np.zeros(L*(K+1)).reshape(L, K+1)
 		Lambda["var"] = np.zeros(L*(K+1)).reshape(L, K+1)
-
-		if len(self.nlrqmodels) == 0: # only make instances the first time
-			self.resid = np.zeros(self.exog.shape[0]*L).reshape(self.exog.shape[0], L)
-			for i in range(L):
-				y = np.dot(self.endog, Omega[i,:].T).reshape(self.endog.shape[0])
-				if interiorpoint:
-					self.nlrqmodels[i] = quantreg(y, self.exog, tau=self.tau)
-				else:
-					self.nlrqmodels[i] = NLRQ(y, self.exog, endogtype=self._endogtype[i], exogtype=self._exogtype, \
-						tau=self.tau, f=self.polynomial, Df=self.dpolynomial, parlen=self.parlen)
-				if self.trace:
-					# pickler cannot deal with lambda expression
-					def trcpre(info): TracePreEstimation(self.logger, info) 
-					def trcvar(info): TraceVarianceCalculation(self.logger, info)
-					self.nlrqmodels[i].PreEstimation += trcpre
-					self.nlrqmodels[i].PostVarianceCalculation += trcvar 
+		logger = logging.getLogger('collective2stage')
 
 		for i in range(L):
 			#with Timing("Fit", True):
-			nlrqresults = self.nlrqmodels[i].fit(x0 = x0, kernel = kernel, dist = dist, bw = bw) 
-			Lambda["par"][i,:] = nlrqresults.params[0:K+1]
-			Lambda["var"][i,:] = np.diagonal(nlrqresults.varcov)[0:K+1]
-			self.resid[:,i] = nlrqresults.resid.T
+			try:
+				nlrqresults = self.nlrqmodels[i].fit(x0 = x0, kernel = self.kernel, dist = self.exog - x0, bw = self.bw) 
+			except NoDataError as e:
+				if ignorenodataerrors and self.trace:
+					logger.warning("NoDataError ignored: " + str(e))
+					Lambda["par"][i,:] = np.zeros(K+1) 
+					Lambda["var"][i,:] = np.ones(K+1)
+				else:
+					raise(e) 
+			else:	
+				Lambda["par"][i,:] = nlrqresults.params[0:K+1]
+				Lambda["var"][i,:] = np.diagonal(nlrqresults.varcov)[0:K+1]
+				#self.resid[:,i] = nlrqresults.resid.T
 	
 		for w in Lambda.keys():
 			b = Lambda[w].T.reshape(L*(K+1)) # b=vec(Lambda)
@@ -139,17 +160,25 @@ class NLRQSystem:
 		# Derivative form:
 		# y1 dy1/dx1 dy1/dx2, dy1/dx3
 		# y2 dy2/dx1 dy2/dx2, dy2/dx3
-		return mu0["par"], mu1["par"], mu0["var"], mu1["var"] 
+		if(self.trace):
+			for f,v in [(mu0["par"], mu0["var"]),(mu1["par"],mu1["var"])]:
+				stars = lambda dy, sdy: "*"*(sum(np.abs(dy/sdy) > np.array(list(map(norm.ppf, [.95,.975,.995])))))
+				logger.debug("  ".join(["{:.3f} ({:.3f}) [{}]".format(dy, np.sqrt(vardy), stars(dy,np.sqrt(vardy))) for dy, vardy in zip(f.flatten(), v.flatten())]))
 
-	def fitgrid(self, h, sizeperdim, M, fixdim = {}, boundaries = None, wavgdens = None, kernel=norm, imethod=Integration.Sampling, empdist = None): 
+		return [mu0["par"], mu1["par"], mu0["var"], mu1["var"]] 
+
+	def fitgrid(self, h, sizeperdim, M, fixdim = {}, boundaries = None, wavgdens = None, kernel=norm, imethod=Integration.Sampling, empdist = None, parallel = True, unwrap_self_parallel_fitter = None): 
 		self.sizeperdim = sizeperdim
+		self.kernel = kernel
+		self.bw = h 
 		x0 = np.empty(self.exog.shape[1])
 		allgrididcs = [i for i in range(self.exog.shape[1]) if i not in fixdim]
 		dimy = self.endog.shape[1]
 		if boundaries is None: 
 			xmins, xmaxs = np.min(self.exog, axis=0), np.max(self.exog, axis=0)
 		else:
-			xmins, xmaxs = np.percentile(self.exog, boundaries[0], axis=0), np.percentile(self.exog, boundaries[1], axis=0)
+			xmins = [np.percentile(x, b*100) for x,b in zip(self.exog.T, boundaries)] # 0, 100 are min, max respectively
+			xmaxs = [np.percentile(x, (1.0-b)*100) for x,b in zip(self.exog.T, boundaries)] 
 		grid = []
 
 		if imethod == Integration.Density or wavgdens == None:
@@ -170,37 +199,37 @@ class NLRQSystem:
 		self.variances = NLRQResult(cgrid.shape[0], len(allgrididcs), dimy, self.interpolationmethod, fixdim)
 		j = 0
 		mu, sigma = np.mean(self.exog, axis=0), np.std(self.exog, axis=0)
-		kernel.SetSigmas(sigma)
-		for x0r in cgrid:
-			x0[allgrididcs] = x0r
-			if len(fixdim) > 0: x0[list(fixdim.keys())] = list(fixdim.values())
-			#dist = np.sum((np.abs(self.exog - x0)/sigma) **2, axis=1)**.5
-			#dist /= np.max(dist)
-			#dist = np.abs(self.exog - x0)/sigma 
-			dist = self.exog - x0
-			#self.logger.debug("x0 = {} min(x) = {} max(x) = {}".format(np.min(self.exog, axis=0), np.max(self.exog, axis=0)))
-			with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, len(allgrididcs)), trc = self.trace, logger = self.logger): 
-				self.PreEstimation.Fire(Fraction(j, len(cgrid)))
-				fct, grad, fctse, gradse = self.fit(x0, kernel, dist, h) 
-				if(self.trace):
-					for f,v in [(fct,fctse),(grad,gradse)]:
-						stars = lambda dy, sdy: "*"*(sum(np.abs(dy/sdy) > np.array(list(map(norm.ppf, [.95,.975,.995])))))
-						self.logger.debug("  ".join(["{:.3f} ({:.3f}) [{}]".format(dy, np.sqrt(vardy), stars(dy,np.sqrt(vardy))) for dy, vardy in zip(f.flatten(), v.flatten())]))
-				self.results.Add(x0r, fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0))
-				self.variances.Add(x0r, fctse, np.delete(gradse, list(fixdim.keys()), 1).flatten(0))
-			j += 1	
+		#kernel.SetSigmas(sigma) 
+		kernel.SetSigmas(np.ones(self.exog.shape[1])) 
+		self.PrepareFit(parallel = parallel)
+		finalgrid = [[v for k,v in sorted(list(zip(allgrididcs, x0r))+list(zip(list(fixdim.keys()), list(fixdim.values()))))] for x0r in cgrid]
+		if not parallel:
+			for x0 in finalgrid:
+				with Timing("nlrqsystem({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, len(allgrididcs)), trc = self.trace, logger = self.logger): 
+					self.PreEstimation.Fire(Fraction(j, len(cgrid)))
+					fct, grad, fctse, gradse = self.fit(x0) 
+					self.results.Add(np.array(x0)[allgrididcs], fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0))
+					self.variances.Add(np.array(x0)[allgrididcs], fctse, np.delete(gradse, list(fixdim.keys()), 1).flatten(0))
+				j += 1	
+		else:
+			from multiprocessing import Pool
+			from os import cpu_count
+			import copy
+			stmp = copy.copy(self)
+			nores = [stmp.__dict__.pop(k) for k in self.__dict__ if k not in ["_endog", "_exog", "trace", "componentwise", "bw", "kernel", "nlrqmodels"]]
+			with Timing("nlrqsystem.par({0}) at {1}: grid {2}^{3}".format(self.tau, x0, sizeperdim, len(allgrididcs)), trc = self.trace, logger = self.logger): 
+				with Pool(processes = cpu_count() - 1) as p:
+					fitres = p.map(unwrap_self_parallel_fitter, zip([stmp]*len(finalgrid), finalgrid))
+			for x0,res in zip(finalgrid, fitres):
+				fct, grad, fctse, gradse = res 
+				self.results.Add(np.array(x0)[allgrididcs], fct, np.delete(grad, list(fixdim.keys()), 1).flatten(0))
+				self.variances.Add(np.array(x0)[allgrididcs], fctse, np.delete(gradse, list(fixdim.keys()), 1).flatten(0))
 
 		self.nlrqmodels = None # better way to free it? GC should get them...
 		self.fixdim = fixdim
 		self.results.populatetree(wavgdens, allgrididcs, self.sizeperdim, M_)
 		self.variances.populatetree(wavgdens, allgrididcs, self.sizeperdim, M_)
 	
-	def gridball(self, dimensions, sizeperdim):
-		eps = 0.05
-		x2y2=cartesian([np.linspace(0+eps,1-eps,sizeperdim)**2]*(dimensions-1)).tolist()
-		for i in x2y2: i.append(1-np.sum(i))
-		x2y2=np.array(x2y2)
-		return np.sqrt(x2y2[np.where(np.all(x2y2>=0, axis=1))])
 				
 class NLRQResult:
 	def __init__(self, N, dimX, dimY, interpolationmethod, fixdim):
@@ -313,7 +342,6 @@ class NLRQResult:
 
 		f, df = [np.asarray(val).flatten() for val in self.interpolate(self.resulttree, np.array(fullx0)[self.grididcs])]
 		if np.any(np.isnan(f)) and not ignorenans: 
-			print(self.X)
 			fullmin_g = np.zeros(len(self.fixdim) + len(self.grididcs))
 			fullmin_g[list(self.fixdim.keys())] = list(self.fixdim.values())
 			fullmin_g[self.grididcs] = np.min(self.X, axis=0) 

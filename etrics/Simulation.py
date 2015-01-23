@@ -5,7 +5,7 @@ from scipy import sqrt
 from fractions import Fraction
 from collections import OrderedDict
 
-import time, sys, types, pickle, logging
+import time, sys, types, pickle, logging, os
 
 Results = enum('Original', 'Bias')
 
@@ -19,19 +19,21 @@ class TryAgain(Exception):
 class Simulation:
 	__data = []
 	__parameters = []
-	__estimates = []
 	__samplesize = []
 	__evaluations = {Results.Bias:OrderedDict(), Results.Original:OrderedDict()} 
 	__estpars = {}
 	__auxiliaryparameters = {};	
 
-	def __init__(self, logger = None):
+	def __init__(self, statefile, logger = None):
 		self.Generating = EventHook(maxhandlers=1)
 		self.Estimating = EventHook(maxhandlers=1)
 		self.PreEstimation = EventHook()
 		self.PostGeneration = EventHook()
 		self.PostEstimation = EventHook()
 		self.Warning = EventHook()
+		self.__statefile = statefile
+		self.__estimates = []
+		self.__actcnt = 0
 		if logger is None:
 			self.logger = logging.getLogger("simulation")
 		else:
@@ -66,10 +68,16 @@ class Simulation:
 	
 	def SetSamplingParameters(self, **kwargs):
 		self.__smplpars = kwargs
+	
+	def CheckState(self, resume):
+		if os.path.exists(self.__statefile) and (resume or input("Statefile found. Resume? [y]es, [n]o?") == "y"):
+			with open(self.__statefile, "rb") as f:
+				self.__estimates = pickle.load(f)
+				self.__actcnt = len(self.__estimates)
 
-	def Simulate(self, S):
-		self.__actcnt = 0
-		for i in range(S):
+	def Simulate(self, S, resume = False):
+		self.CheckState(resume)
+		for i in range(self.__actcnt, S):
 			self.PreEstimation.Fire(Fraction(i,S))
 			starttime = time.time()
 			success = False
@@ -90,11 +98,14 @@ class Simulation:
 					elif option == 't':
 						raise(ki)
 					print("Moving on...")	
+					success = False
 				else:
 					self.__estimates.append(est)
 					success = True
 					self.__actcnt += 1
 					self.WriteTable()
+					with open("{0}/Simulation.{1}.bin".format(dir, name), "wb") as f:
+						pickle.dump(self.__estimates, f)
 
 			self.PostEstimation.Fire(time.time()-starttime)		
 	
@@ -155,14 +166,18 @@ class Simulation:
 			
 		if self.__standalone:
 			self.WriteLine(0, "\\pagebreak\n\\begin{lstlisting}")
+		else:
+			self.WriteLine(0, "\\iffalse")
 
 		for k,v in [("Fct.Form",self.__form),("B",self.__actcnt)]+list(self.__smplpars.items())+list(self.__estpars.items())+list(self.__strpars.items()):
 			if not (isinstance(v, types.FunctionType) or (isinstance(v, list) and isinstance(v[0], types.FunctionType))):
-				self.WriteLine(0, "{2!s:} {0!s: <20} = {1!s: <50}".format(k, v.replace("\n", " "), "%" if not self.__standalone else ""))
+				self.WriteLine(0, "{2!s:} {0!s: <20} = {1!s: <50}".format(k, v, "%" if not self.__standalone else ""))
 
 		if self.__standalone: 
 			self.WriteLine(0, "\\end{lstlisting}")	
 			self.WriteLine(0, "\\end{document}\n")
+		else:
+			self.WriteLine(0, "\\fi")
 		
 		if self.__uselatex: self.__tablefilehandle.close()
 
