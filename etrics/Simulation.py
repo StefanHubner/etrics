@@ -104,7 +104,7 @@ class Simulation:
 					success = True
 					self.__actcnt += 1
 					self.WriteTable()
-					with open("{0}/Simulation.{1}.bin".format(dir, name), "wb") as f:
+					with open(self.__statefile, "wb") as f:
 						pickle.dump(self.__estimates, f)
 
 			self.PostEstimation.Fire(time.time()-starttime)		
