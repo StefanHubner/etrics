@@ -318,6 +318,11 @@ class EmpiricalDistribution:
 	def cdf(self, est):
 		raise NotImplementedError()
 	
-	def sample(self, N):
+	def sample(self, N, truncateoutliers = True):
 		idcs = list(map(int, np.floor(np.random.uniform(size=N)*self.data.shape[0])))
-		return self.data[idcs,:]
+		if truncateoutliers:
+			tails = 2
+			filter_ = lambda x: np.maximum(np.minimum(np.percentile(self.data, 100-tails, axis=0), x), np.percentile(self.data, tails, axis=0))
+		else:
+			filter_ = lambda x: x
+		return filter_(self.data[idcs,:])
