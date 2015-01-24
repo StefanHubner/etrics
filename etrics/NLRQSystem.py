@@ -264,6 +264,10 @@ class NLRQResult:
 	@property
 	def Everything(self):
 		return self._resultmatrix
+	
+	@property
+	def EverythingVarE(self):
+		return self._resultmatrixVarE
 
 	def _populatetree(self, t, z, sizey, sizedy):
 		if z.shape[1] > sizey+sizedy:
@@ -297,13 +301,19 @@ class NLRQResult:
 			ys = np.multiply(self.Everything[:,len(pgrididcs):], np.matrix(weights).T).reshape(L, J * M)
 			ys = np.dot(ys, np.kron(np.ones((M, 1)), np.identity(J)))
 			restmp = ys if xdim == 0 else np.hstack([x0s, ys])
+			ys2 = np.multiply(np.power(self.Everything[:,len(pgrididcs):], 2), np.matrix(weights).T).reshape(L, J * M)
+			ys2 = np.dot(ys2, np.kron(np.ones((M, 1)), np.identity(J)))
+			restmpvarx = ys2 if xdim == 0 else np.hstack([x0s, ys2 - np.power(ys, 2)])
+			#print(restmpvarx)
 			#print(np.hstack([self.Everything[0:M,0:6], 100*np.matrix(weights[0:M]).T]), restmp[0,0:xdim+self.dimY])
 			#print(restmp[:,0:len(pgrididcs)+self.dimY])
 		else: 
 			self.errordim = 0
 			restmp = self.Everything 
+			restmpvarx = np.zeros(self.Everything.shape)
 
 		self._resultmatrix = restmp
+		self._resultmatrixVarE = restmpvarx
 	
 	def interpolate(self, node, x0):
 		if len(x0) > 0:
