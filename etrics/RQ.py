@@ -3,7 +3,7 @@ from scipy.optimize import minimize
 from scipy import stats
 
 from statsmodels.tools.decorators import (resettable_cache, cache_readonly, cache_writable)
-from statsmodels.tools.tools import rank
+from numpy.linalg import matrix_rank
 
 import numpy as np
 import statsmodels.api as sm
@@ -34,8 +34,8 @@ class RQ(base.LikelihoodModel):
 
 	def _initialize(self):
 		self.nobs = float(self.endog.shape[0])
-		self.df_resid = np.float(self.exog.shape[0] - rank(self.exog))
-		self.df_model = np.float(rank(self.exog)-1)
+		self.df_resid = np.float(self.exog.shape[0] - matrix_rank(self.exog))
+		self.df_model = np.float(matrix_rank(self.exog)-1)
 		
 		self.c = -self.endog
 		self.A = np.concatenate([np.identity(self.endog.shape[0]), -np.identity(self.endog.shape[0])], axis=0)

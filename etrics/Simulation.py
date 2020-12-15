@@ -201,11 +201,12 @@ class Simulation:
 		
 # usage example
 
-def createData(theta, N):
+def createData(theta, form, N):
 	#N = samplingpars["N"]
+	beta = theta["beta"]
 	X = matrix([repeat(1, N), norm.rvs(loc=4, scale=2, size=N), norm.rvs(loc=5, scale=1, size=N)])
 	eps = matrix(norm.rvs(loc=0, scale=1, size=N))
-	return [X.T * matrix(theta).T + eps.T, X.T]
+	return [X.T * matrix(beta).T + eps.T, X.T]
 
 def estimateModel(data):
 	import statsmodels.regression.linear_model as model
@@ -220,13 +221,16 @@ def onWarning(ex):
 	print("warning: DGP caused estimation to fail: " + ex.msg)
 
 def main():
-	x = Simulation()
-	x.SetParameters([1,2,3], ("beta{} "*3).format(1,2,3).split())
+	x = Simulation("/tmp/statefile.tmp")
+	x.SetIdentifiedParameters([1,2,3], ("beta{} "*3).format(1,2,3).split())
+	x.SetStructuralParameters({"beta":[1,2,3]}, None)
 	x.SetSamplingParameters(N=1000)
+	x.SetEstimationParameters()
 	x.Generating += createData
 	x.Estimating += estimateModel
 	x.PreEstimation += Progress 
 	x.Warning += onWarning
+	x.SetWritingOptions("/tmp/table.tmp")
 	
 	x.Simulate(100)
 
